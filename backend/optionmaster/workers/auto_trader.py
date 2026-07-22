@@ -42,11 +42,15 @@ ENTRY_TO = 14 * 60 + 30        # last entry attempt
 SQUARE_OFF = 15 * 60 + 10      # force-close leftovers
 SESSION_END = 15 * 60 + 30
 ENTRY_RETRY_SECONDS = 300      # ask the gate at most every 5 min
+CHAIN_RETRIES = 3              # shared Dhan rate bucket — see _try_entry
+CHAIN_RETRY_BACKOFF = 4.0
 
 _started = False
 _last_attempt = 0.0
 _last_reason: str | None = None
 _awake_held = False
+_last_tick: str | None = None      # heartbeat — proves the thread is alive
+_last_error: str | None = None
 
 
 # ── state ─────────────────────────────────────────────────────────────────
@@ -95,6 +99,11 @@ def status() -> dict:
         "max_trades_per_day": _max_trades(),
         "last_reason": _last_reason,
         "day": st.get("day"),
+        # Diagnostics: a null last_tick means the worker thread never ran —
+        # distinguishes "no setup found" from "the loop isn't alive at all".
+        "worker_started": _started,
+        "last_tick": _last_tick,
+        "last_error": _last_error,
     }
 
 
@@ -174,7 +183,7 @@ def _try_entry(today: str) -> None:
         _last_reason = "no non-0DTE expiry available"
         return
 
-    decision = app.create_dhan_paper_trade(CreatePaperTradeRequest(
+    request = CreatePaperTradeRequest(
         symbol=settings.auto_symbol,
         security_id=settings.auto_security_id,
         segment=settings.auto_segment,
@@ -182,7 +191,32 @@ def _try_entry(today: str) -> None:
         expiry=expiry,
         lots=settings.auto_lots,
         capital=settings.auto_capital,
-    ))
+    )
+
+    # One Dhan account = one shared rate bucket (~1 option-chain call / 3s),
+    # and AlphaEdge's collector plus TradingBrain's forward-test polling are
+    # on it all session. A throttled chain call surfaces as a generic
+    # "Dhan API failure" with null error fields, so retry a few times the way
+    # the strategy-lab collector does before giving up on this slot.
+    decision = None
+    last_exc: Exception | None = None
+    for attempt in range(CHAIN_RETRIES):
+        try:
+            decision = app.create_dhan_paper_trade(request)
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt < CHAIN_RETRIES - 1:
+                time.sleep(CHAIN_RETRY_BACKOFF)
+
+    if decision is None:
+        # Contention, not a verdict — retry in a minute rather than burning
+        # the full ENTRY_RETRY_SECONDS slot on someone else's traffic.
+        _last_attempt = time.time() - ENTRY_RETRY_SECONDS + 60
+        _last_reason = f"chain unavailable after {CHAIN_RETRIES} tries: {last_exc}"
+        print(f"[AutoTrader] {_last_reason}")
+        return
+
     _last_reason = decision.reason
     if decision.accepted:
         _save(day=today, entries=_entries_today(today) + 1)
@@ -222,17 +256,27 @@ def _tick(broker) -> None:
     # 3) entry attempt
     if ENTRY_FROM <= mins <= ENTRY_TO and not _open_trades(broker) \
             and _entries_today(today) < _max_trades():
+        global _last_reason
         try:
             _try_entry(today)
         except Exception as exc:
-            print(f"[AutoTrader] entry attempt failed: {exc}")
+            # Surface it. This except only printed to the console, so a
+            # throwing entry attempt was indistinguishable from one that
+            # never ran — status() showed last_reason=null either way.
+            _last_reason = f"entry attempt failed: {type(exc).__name__}: {exc}"
+            print(f"[AutoTrader] {_last_reason}")
 
 
 def _loop(broker) -> None:
+    global _last_tick, _last_error
     while True:
         try:
             _tick(broker)
+            _last_tick = datetime.now(IST).isoformat(timespec="seconds")
+            _last_error = None
         except Exception as exc:  # the loop must survive anything
+            _last_error = f"{type(exc).__name__}: {exc}"
+            _last_tick = datetime.now(IST).isoformat(timespec="seconds")
             print(f"[AutoTrader] tick failed: {exc}")
         time.sleep(TICK_SECONDS)
 
