@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#071425" />
+    <title>OptionMaster | Paper Trading Intelligence</title>
+    <link rel="stylesheet" href="styles.css?v=20260720" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <header class="topbar">
+      <a class="brand" href="#top" aria-label="OptionMaster dashboard home">
+        <span class="brand-mark" aria-hidden="true">⌁</span>
+        <span>Option<span>Master</span></span>
+      </a>
+      <div class="topbar-actions">
+        <p class="last-updated" id="last-updated">Loading dashboard…</p>
+        <button class="button button-secondary" id="refresh-button" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main class="app-shell" id="top">
+      <aside class="sidebar" aria-label="Dashboard sections">
+        <div class="mode-badge" id="mode-badge"><span></span> Checking mode</div>
+        <nav>
+          <a class="nav-link active" href="#overview">Overview</a>
+          <a class="nav-link" href="#evidence">Paper evidence</a>
+          <a class="nav-link" href="#history">History &amp; analysis</a>
+          <a class="nav-link" href="#learning">Learning guardrail</a>
+          <a class="nav-link" href="#system">System health</a>
+        </nav>
+        <div class="sidebar-note">
+          <span class="note-icon">✓</span>
+          <p>Orders are not placed from this dashboard. It is designed for review and paper-test discipline.</p>
+        </div>
+      </aside>
+
+      <section class="content">
+        <section class="hero" id="overview">
+          <div>
+            <p class="eyebrow">OPTION INTELLIGENCE · INDIA</p>
+            <h1>Trade with evidence,<br /><em>not excitement.</em></h1>
+            <p class="hero-copy">A clear view of OptionMaster’s paper-first market analysis, risk controls, and learning evidence.</p>
+          </div>
+          <div class="connection-card" id="connection-card" aria-live="polite">
+            <div class="connection-topline"><span class="status-dot loading"></span><span id="connection-label">Connecting to OptionMaster</span></div>
+            <p id="connection-detail">Looking for the local backend on port 8300.</p>
+          </div>
+        </section>
+
+        <section class="stat-grid" aria-label="Key system statistics">
+          <article class="stat-card primary-card">
+            <p class="stat-label">Active strategy</p>
+            <div class="stat-value profile-name" id="active-profile">—</div>
+            <p class="stat-caption" id="active-profile-caption">Loading the current paper profile.</p>
+          </article>
+          <article class="stat-card">
+            <p class="stat-label">Paper net P&amp;L</p>
+            <div class="stat-value" id="paper-net-pnl">—</div>
+            <p class="stat-caption" id="paper-pnl-caption">Completed paper trades after costs</p>
+          </article>
+          <article class="stat-card">
+            <p class="stat-label">Forward test trades</p>
+            <div class="stat-value" id="paper-trade-count">—</div>
+            <p class="stat-caption" id="paper-count-caption">Closed results being evaluated</p>
+          </article>
+          <article class="stat-card">
+            <p class="stat-label">Dhan market data</p>
+            <div class="stat-value" id="dhan-status">—</div>
+            <p class="stat-caption" id="dhan-caption">Credential and data connection status</p>
+          </article>
+        </section>
+
+        <section class="shadow-strip" aria-label="Shadow context filter status">
+          <div class="shadow-intro">
+            <p class="eyebrow">SHADOW CONTEXT FILTER</p>
+            <h2>Location, freshness, and room-to-target</h2>
+            <p>The filter observes every Dhan analysis without changing an entry decision.</p>
+          </div>
+          <div class="shadow-metric"><span>Evaluated</span><strong id="context-evaluated">—</strong></div>
+          <div class="shadow-metric"><span>Would allow</span><strong class="positive" id="context-allow">—</strong></div>
+          <div class="shadow-metric"><span>Would skip</span><strong class="negative" id="context-skip">—</strong></div>
+          <div class="shadow-metric"><span>Outcome links</span><strong id="context-outcomes">—</strong></div>
+          <div class="shadow-metric"><span>Avg. confluence</span><strong id="context-confluence">—</strong></div>
+        </section>
+
+        <section class="panel outcome-panel" id="context-research">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">EVIDENCE-BASED IMPROVEMENT</p>
+              <h2>What is separating paper winners from losers?</h2>
+            </div>
+            <span class="pill neutral" id="research-readiness">Collecting evidence</span>
+          </div>
+          <p class="section-copy">OptionMaster compares actual net paper outcomes with the context captured before each entry. This becomes a research input after 200 linked closed trades—not an automatic model change.</p>
+          <div class="outcome-grid" id="outcome-grid" aria-live="polite"></div>
+        </section>
+
+        <section class="panel evidence-panel" id="evidence">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">COST-AWARE FORWARD TESTING</p>
+              <h2>Paper evidence</h2>
+            </div>
+            <span class="pill">Net of charges</span>
+          </div>
+          <div class="evidence-grid">
+            <div class="metric-block">
+              <span>Gross P&amp;L</span>
+              <strong id="paper-gross-pnl">—</strong>
+            </div>
+            <div class="metric-block">
+              <span>Trading costs</span>
+              <strong id="paper-charges">—</strong>
+            </div>
+            <div class="metric-block">
+              <span>Win rate</span>
+              <strong id="paper-win-rate">—</strong>
+            </div>
+            <div class="metric-block">
+              <span>Profit factor</span>
+              <strong id="paper-profit-factor">—</strong>
+            </div>
+          </div>
+          <p class="fine-print">Results include configured brokerage, statutory levies, GST, and estimated bid–ask execution costs. Reconcile against actual contract notes.</p>
+        </section>
+
+        <section class="panel history-panel" id="history">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">HISTORY &amp; ANALYSIS</p>
+              <h2>Trade history and analysis</h2>
+            </div>
+            <div class="history-controls">
+              <select class="history-select" id="history-source" aria-label="History source">
+                <option value="paper">Paper trades</option>
+              </select>
+              <select class="history-select" id="backtest-strategy" aria-label="Backtest strategy">
+                <option value="stored-scalp-v1">Momentum scalp (stored-scalp-v1)</option>
+                <option value="stored-reversal-v1">Sweep reversal (stored-reversal-v1)</option>
+              </select>
+              <button class="button" id="run-backtest-button" type="button">Run backtest</button>
+            </div>
+          </div>
+          <p class="section-copy" id="history-note">Backtests replay the stored Dhan option-chain snapshots through the minute-scalp rules, net of all charges. Paper history shows the forward test.</p>
+          <div class="evidence-grid history-stats">
+            <div class="metric-block"><span>Trades</span><strong id="history-trades">—</strong></div>
+            <div class="metric-block"><span>Net P&amp;L</span><strong id="history-net">—</strong></div>
+            <div class="metric-block"><span>Win rate</span><strong id="history-winrate">—</strong></div>
+            <div class="metric-block"><span>Profit factor</span><strong id="history-pf">—</strong></div>
+            <div class="metric-block"><span>Max drawdown</span><strong id="history-maxdd">—</strong></div>
+            <div class="metric-block"><span>Avg hold</span><strong id="history-hold">—</strong></div>
+          </div>
+          <div class="equity-wrap">
+            <p class="stat-label">Equity curve (cumulative net P&amp;L per trade)</p>
+            <svg id="equity-curve" viewBox="0 0 800 220" preserveAspectRatio="none" role="img" aria-label="Equity curve"></svg>
+          </div>
+          <div class="outcome-grid" id="history-breakdowns"></div>
+          <div class="table-wrap">
+            <table class="history-table">
+              <thead>
+                <tr><th>Date</th><th>Symbol</th><th>Contract</th><th>Entry</th><th>Exit</th><th>Held</th><th>Exit via</th><th class="num">Entry ₹</th><th class="num">Exit ₹</th><th class="num">Net P&amp;L</th></tr>
+              </thead>
+              <tbody id="history-table-body">
+                <tr><td colspan="10" class="empty-cell">No trades yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="fine-print" id="history-footnote">Stored-data status is loading…</p>
+        </section>
+
+        <section class="panel learning-panel" id="learning">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">CONTROLLED ADAPTATION</p>
+              <h2>Learning guardrail</h2>
+            </div>
+            <span class="pill neutral" id="learning-summary">Reviewing profiles</span>
+          </div>
+          <p class="section-copy">A new profile cannot replace the baseline on backtest results alone. It must earn its place with closed, net-of-cost paper outcomes.</p>
+          <div class="profile-list" id="profile-list" aria-live="polite">
+            <div class="empty-state">Loading profile evidence…</div>
+          </div>
+        </section>
+
+        <section class="bottom-grid" id="system">
+          <article class="panel readiness-panel">
+            <div class="section-heading compact">
+              <div>
+                <p class="eyebrow">READINESS</p>
+                <h2>System health</h2>
+              </div>
+            </div>
+            <dl class="health-list">
+              <div><dt>Application</dt><dd id="health-application">—</dd></div>
+              <div><dt>Backend version</dt><dd id="health-version">—</dd></div>
+              <div><dt>NSE instrument master</dt><dd id="instrument-status">—</dd></div>
+              <div><dt>Telegram alerts</dt><dd id="telegram-status">—</dd></div>
+              <div><dt>Reserved frontend port</dt><dd>5275</dd></div>
+            </dl>
+          </article>
+
+          <article class="panel discipline-panel">
+            <p class="eyebrow">PAPER-FIRST DISCIPLINE</p>
+            <h2>What this dashboard will not do</h2>
+            <ul>
+              <li>Turn on live trading</li>
+              <li>Promote an unproven profile</li>
+              <li>Hide trading costs from results</li>
+            </ul>
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <template id="profile-template">
+      <article class="profile-row">
+        <div class="profile-main">
+          <div class="profile-title-row"><h3></h3><span class="profile-badge"></span></div>
+          <p class="profile-description"></p>
+          <p class="profile-evidence"></p>
+        </div>
+        <div class="profile-outcome"></div>
+      </article>
+    </template>
+
+    <template id="outcome-template">
+      <article class="outcome-card">
+        <h3></h3>
+        <div class="outcome-rows"></div>
+      </article>
+    </template>
+
+    <script src="app.js?v=20260720" defer></script>
+  </body>
+</html>
