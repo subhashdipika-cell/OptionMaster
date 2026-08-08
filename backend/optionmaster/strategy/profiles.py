@@ -18,6 +18,11 @@ class StrategyProfile(BaseModel):
     maximum_option_spread_fraction: float = Field(default=0.03, gt=0, le=1)
     minimum_signal_score: float = Field(default=0.65, ge=0, le=1)
     risk_gate_minimum_score: float = Field(default=0.60, ge=0, le=1)
+    # These parameters apply only to an explicitly designated paper trial.
+    # They cannot silently become a real-order configuration.
+    paper_trial_only: bool = False
+    paper_stop_loss_fraction: float | None = Field(default=None, gt=0, le=0.50)
+    paper_target_fraction: float | None = Field(default=None, gt=0, le=1.00)
 
 
 BASELINE_PROFILE = StrategyProfile(
@@ -42,5 +47,35 @@ TIGHT_MOMENTUM_PROFILE = StrategyProfile(
     risk_gate_minimum_score=0.70,
 )
 
+PAPER_MOMENTUM_10_15_PROFILE = StrategyProfile(
+    id="paper-momentum-10-15-v1",
+    name="Momentum scalp paper trial — 10% / 15%",
+    description=(
+        "Controlled forward-paper trial of the historical momentum scalp: "
+        "10% premium stop-loss and 15% premium target. It cannot submit a real Dhan order."
+    ),
+    paper_trial_only=True,
+    paper_stop_loss_fraction=0.10,
+    paper_target_fraction=0.15,
+)
 
-BUILT_IN_PROFILES: tuple[StrategyProfile, ...] = (BASELINE_PROFILE, TIGHT_MOMENTUM_PROFILE)
+PAPER_ORB_VWAP_PROFILE = StrategyProfile(
+    id="paper-orb-vwap-v1",
+    name="ORB + VWAP paper trial — 5% / 10%",
+    description=(
+        "Forward-paper trial of the fixed opening-range breakout with VWAP, "
+        "volume, ADX/DMI, liquidity, and option-premium confirmation. "
+        "It cannot submit a real Dhan order."
+    ),
+    paper_trial_only=True,
+    paper_stop_loss_fraction=0.05,
+    paper_target_fraction=0.10,
+)
+
+
+BUILT_IN_PROFILES: tuple[StrategyProfile, ...] = (
+    BASELINE_PROFILE,
+    TIGHT_MOMENTUM_PROFILE,
+    PAPER_MOMENTUM_10_15_PROFILE,
+    PAPER_ORB_VWAP_PROFILE,
+)

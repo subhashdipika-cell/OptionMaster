@@ -17,6 +17,9 @@ from optionmaster.context.models import (
 )
 from optionmaster.costs.calculator import NetTradeResult
 from optionmaster.paper.models import PaperTrade
+from optionmaster.ollama.models import OllamaReview, OllamaReviewSummary, OllamaVerdict
+from optionmaster.market.models import Regime
+from optionmaster.market.regime_learning import RegimeObservation, RegimeStrategyPerformance
 from optionmaster.scalping.models import ScalpingDecision
 
 
@@ -40,6 +43,22 @@ class RecordedBacktestResult(BaseModel):
     result: NetTradeResult
 
 
+class EntryAttempt(BaseModel):
+    """Durable audit record for every autonomous entry decision."""
+
+    id: str
+    recorded_at: datetime
+    mode: str
+    outcome: str
+    reason: str
+    symbol: str
+    expiry: str | None = None
+    side: str | None = None
+    strike: float | None = None
+    quantity: int | None = None
+    order_id: str | None = None
+
+
 class TradeJournal:
     """SQLite journal that preserves cost-aware evidence across restarts."""
 
@@ -55,10 +74,11 @@ class TradeJournal:
         with self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO paper_trades (id, strategy_id, context_decision_id, status, gross_pnl, net_pnl, charges, payload, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO paper_trades (id, strategy_id, regime, context_decision_id, status, gross_pnl, net_pnl, charges, payload, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     strategy_id=excluded.strategy_id,
+                    regime=excluded.regime,
                     context_decision_id=excluded.context_decision_id,
                     status=excluded.status,
                     gross_pnl=excluded.gross_pnl,
@@ -70,6 +90,7 @@ class TradeJournal:
                 (
                     trade.id,
                     trade.strategy_id,
+                    trade.regime.value,
                     trade.context_decision_id,
                     trade.status.value,
                     trade.gross_pnl,
@@ -84,6 +105,69 @@ class TradeJournal:
         with self._connection() as conn:
             rows = conn.execute("SELECT payload FROM paper_trades ORDER BY updated_at DESC").fetchall()
         return [PaperTrade.model_validate_json(row[0]) for row in rows]
+
+    def record_regime_observation(self, observation: RegimeObservation) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO regime_observations (id, symbol, regime, active_strategy_id, routed_strategy_id, payload, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    observation.id,
+                    observation.symbol,
+                    observation.regime.value,
+                    observation.active_strategy_id,
+                    observation.routed_strategy_id,
+                    observation.model_dump_json(),
+                    observation.recorded_at.isoformat(),
+                ),
+            )
+
+    def latest_regime_observation(self) -> RegimeObservation | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT payload FROM regime_observations ORDER BY recorded_at DESC LIMIT 1"
+            ).fetchone()
+        return RegimeObservation.model_validate_json(str(row[0])) if row else None
+
+    def regime_strategy_performance(self) -> list[RegimeStrategyPerformance]:
+        """Closed forward-paper outcomes segmented by the regime saved at entry."""
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT regime, strategy_id, gross_pnl, net_pnl, charges
+                FROM paper_trades
+                WHERE status != ? AND regime IS NOT NULL
+                """,
+                ("OPEN",),
+            ).fetchall()
+        groups: dict[tuple[str, str], list[tuple[float, float, float]]] = {}
+        for regime, strategy_id, gross_pnl, net_pnl, charges in rows:
+            key = (str(regime), str(strategy_id))
+            groups.setdefault(key, []).append((float(gross_pnl), float(net_pnl), float(charges)))
+        results: list[RegimeStrategyPerformance] = []
+        for (regime_name, strategy_id), values in groups.items():
+            net_values = [value[1] for value in values]
+            wins = sum(value > 0 for value in net_values)
+            losses = sum(value < 0 for value in net_values)
+            profit = sum(value for value in net_values if value > 0)
+            loss = abs(sum(value for value in net_values if value < 0))
+            results.append(
+                RegimeStrategyPerformance(
+                    regime=Regime(regime_name),
+                    strategy_id=strategy_id,
+                    closed_trades=len(values),
+                    gross_pnl=round(sum(value[0] for value in values), 2),
+                    charges=round(sum(value[2] for value in values), 2),
+                    net_pnl=round(sum(net_values), 2),
+                    wins=wins,
+                    losses=losses,
+                    win_rate_pct=round((wins / len(values)) * 100, 2) if values else 0.0,
+                    profit_factor=round(profit / loss, 4) if loss else None,
+                )
+            )
+        return sorted(results, key=lambda item: (item.regime.value, item.strategy_id))
 
     def record_backtest_trade(self, result: NetTradeResult, *, strategy_id: str) -> RecordedBacktestResult:
         record_id = uuid4().hex
@@ -163,6 +247,84 @@ class TradeJournal:
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
+
+    def record_entry_attempt(self, attempt: EntryAttempt) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO entry_attempts (id, mode, outcome, reason, symbol, expiry, side, strike, quantity, order_id, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt.id, attempt.mode, attempt.outcome, attempt.reason,
+                    attempt.symbol, attempt.expiry, attempt.side, attempt.strike,
+                    attempt.quantity, attempt.order_id, attempt.recorded_at.isoformat(),
+                ),
+            )
+
+    def list_entry_attempts(self, limit: int = 20) -> list[EntryAttempt]:
+        safe_limit = max(1, min(limit, 200))
+        with self._connection() as conn:
+            rows = conn.execute(
+                """SELECT id, mode, outcome, reason, symbol, expiry, side, strike, quantity, order_id, recorded_at
+                   FROM entry_attempts ORDER BY recorded_at DESC LIMIT ?""",
+                (safe_limit,),
+            ).fetchall()
+        return [
+            EntryAttempt(
+                id=str(row[0]), mode=str(row[1]), outcome=str(row[2]), reason=str(row[3]),
+                symbol=str(row[4]), expiry=str(row[5]) if row[5] is not None else None,
+                side=str(row[6]) if row[6] is not None else None,
+                strike=float(row[7]) if row[7] is not None else None,
+                quantity=int(row[8]) if row[8] is not None else None,
+                order_id=str(row[9]) if row[9] is not None else None,
+                recorded_at=datetime.fromisoformat(str(row[10])),
+            )
+            for row in rows
+        ]
+
+    def record_ollama_review(self, review: OllamaReview) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO ollama_reviews (id, context_decision_id, symbol, side, verdict, confidence, payload, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review.id, review.context_decision_id, review.symbol, review.side.value,
+                    review.verdict.value, review.confidence, review.model_dump_json(), review.recorded_at.isoformat(),
+                ),
+            )
+
+    def list_ollama_reviews(self, limit: int = 20) -> list[OllamaReview]:
+        safe_limit = max(1, min(limit, 200))
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT payload FROM ollama_reviews ORDER BY recorded_at DESC LIMIT ?", (safe_limit,)
+            ).fetchall()
+        return [OllamaReview.model_validate_json(str(row[0])) for row in rows]
+
+    def ollama_review_summary(self) -> OllamaReviewSummary:
+        with self._connection() as conn:
+            rows = conn.execute("SELECT verdict FROM ollama_reviews").fetchall()
+            outcomes = conn.execute(
+                """
+                SELECT paper_trades.net_pnl
+                FROM paper_trades
+                JOIN ollama_reviews ON ollama_reviews.context_decision_id = paper_trades.context_decision_id
+                WHERE paper_trades.status != ?
+                """,
+                ("OPEN",),
+            ).fetchall()
+        verdicts = [str(row[0]) for row in rows]
+        return OllamaReviewSummary(
+            total_reviews=len(verdicts),
+            allow_count=verdicts.count(OllamaVerdict.ALLOW.value),
+            review_count=verdicts.count(OllamaVerdict.REVIEW.value),
+            skip_count=verdicts.count(OllamaVerdict.SKIP.value),
+            linked_closed_trades=len(outcomes),
+            linked_net_pnl=round(sum(float(row[0]) for row in outcomes), 2),
+        )
 
     def record_context_decision(self, decision: ContextDecision) -> None:
         """Persist each shadow-context evaluation, including filters that would skip a setup."""
@@ -298,6 +460,7 @@ class TradeJournal:
                 CREATE TABLE IF NOT EXISTS paper_trades (
                     id TEXT PRIMARY KEY,
                     strategy_id TEXT NOT NULL DEFAULT 'baseline-v1',
+                    regime TEXT,
                     context_decision_id TEXT,
                     status TEXT NOT NULL,
                     gross_pnl REAL NOT NULL,
@@ -344,10 +507,43 @@ class TradeJournal:
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS entry_attempts (
+                    id TEXT PRIMARY KEY,
+                    mode TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    expiry TEXT,
+                    side TEXT,
+                    strike REAL,
+                    quantity INTEGER,
+                    order_id TEXT,
+                    recorded_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS ollama_reviews (
+                    id TEXT PRIMARY KEY,
+                    context_decision_id TEXT,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    confidence INTEGER NOT NULL,
+                    payload TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS regime_observations (
+                    id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    regime TEXT NOT NULL,
+                    active_strategy_id TEXT NOT NULL,
+                    routed_strategy_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL
+                );
                 """
             )
             self._ensure_column(conn, "paper_trades", "strategy_id", "TEXT NOT NULL DEFAULT 'baseline-v1'")
             self._ensure_column(conn, "paper_trades", "context_decision_id", "TEXT")
+            self._ensure_column(conn, "paper_trades", "regime", "TEXT")
             self._ensure_column(conn, "backtest_trades", "strategy_id", "TEXT NOT NULL DEFAULT 'baseline-v1'")
 
     @staticmethod

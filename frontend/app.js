@@ -20,6 +20,36 @@ const elements = {
   paperCharges: document.querySelector("#paper-charges"),
   paperWinRate: document.querySelector("#paper-win-rate"),
   paperProfitFactor: document.querySelector("#paper-profit-factor"),
+  ollamaStatus: document.querySelector("#ollama-status"),
+  ollamaDetail: document.querySelector("#ollama-detail"),
+  ollamaReviews: document.querySelector("#ollama-reviews"),
+  ollamaAllow: document.querySelector("#ollama-allow"),
+  ollamaCaution: document.querySelector("#ollama-caution"),
+  ollamaOutcomes: document.querySelector("#ollama-outcomes"),
+  regimeCurrent: document.querySelector("#regime-current"),
+  regimeRouting: document.querySelector("#regime-routing"),
+  regimeConfidence: document.querySelector("#regime-confidence"),
+  regimeProfile: document.querySelector("#regime-profile"),
+  regimeSample: document.querySelector("#regime-sample"),
+  regimeThreshold: document.querySelector("#regime-threshold"),
+  regimePerformanceList: document.querySelector("#regime-performance-list"),
+  executionMode: document.querySelector("#execution-mode"),
+  executionDetail: document.querySelector("#execution-detail"),
+  paperModeButton: document.querySelector("#paper-mode-button"),
+  realModeButton: document.querySelector("#real-mode-button"),
+  realModeConfirmation: document.querySelector("#real-mode-confirmation"),
+  realModePhrase: document.querySelector("#real-mode-phrase"),
+  realModeCancel: document.querySelector("#real-mode-cancel"),
+  realModeConfirm: document.querySelector("#real-mode-confirm"),
+  autoTraderStatus: document.querySelector("#auto-trader-status"),
+  autoTraderReason: document.querySelector("#auto-trader-reason"),
+  autoTraderAttempt: document.querySelector("#auto-trader-attempt"),
+  retestMonitorStatus: document.querySelector("#retest-monitor-status"),
+  retestMonitorDetail: document.querySelector("#retest-monitor-detail"),
+  retestCeButton: document.querySelector("#retest-ce-button"),
+  retestPeButton: document.querySelector("#retest-pe-button"),
+  sidebarExecutionNote: document.querySelector("#sidebar-execution-note"),
+  sidebarExecutionText: document.querySelector("#sidebar-execution-text"),
   contextEvaluated: document.querySelector("#context-evaluated"),
   contextAllow: document.querySelector("#context-allow"),
   contextSkip: document.querySelector("#context-skip"),
@@ -29,12 +59,16 @@ const elements = {
   outcomeGrid: document.querySelector("#outcome-grid"),
   learningSummary: document.querySelector("#learning-summary"),
   profileList: document.querySelector("#profile-list"),
+  candidateResearchButton: document.querySelector("#candidate-research-button"),
+  candidateResearchDetail: document.querySelector("#candidate-research-detail"),
+  candidateResearchResults: document.querySelector("#candidate-research-results"),
   healthApplication: document.querySelector("#health-application"),
   healthVersion: document.querySelector("#health-version"),
   instrumentStatus: document.querySelector("#instrument-status"),
   profileTemplate: document.querySelector("#profile-template"),
   outcomeTemplate: document.querySelector("#outcome-template"),
   telegramStatus: document.querySelector("#telegram-status"),
+  ollamaHealth: document.querySelector("#ollama-health"),
   historySource: document.querySelector("#history-source"),
   runBacktestButton: document.querySelector("#run-backtest-button"),
   backtestStrategy: document.querySelector("#backtest-strategy"),
@@ -111,6 +145,109 @@ function renderPaperPerformance(performance) {
   elements.paperProfitFactor.textContent = performance.profit_factor == null ? "—" : Number(performance.profit_factor).toFixed(2);
 }
 
+function renderOllama(status, summary) {
+  const connected = status.enabled && status.available;
+  elements.ollamaStatus.textContent = connected ? `Local · ${status.model}` : status.enabled ? "Model unavailable" : "Disabled";
+  elements.ollamaStatus.classList.toggle("ready", connected);
+  elements.ollamaDetail.textContent = connected
+    ? `Local model ${status.model} reviews directional setups in shadow mode. Its verdict is research only; deterministic market and risk rules remain in control.`
+    : (status.last_error || "Ollama is disabled or the configured model is not available.");
+  elements.ollamaReviews.textContent = number(summary.total_reviews);
+  elements.ollamaAllow.textContent = number(summary.allow_count);
+  elements.ollamaCaution.textContent = `${number(summary.review_count)} / ${number(summary.skip_count)}`;
+  elements.ollamaOutcomes.textContent = `${number(summary.linked_closed_trades)} · ${currency(summary.linked_net_pnl)}`;
+  elements.ollamaHealth.textContent = connected ? "Ready (shadow)" : "Unavailable";
+  elements.ollamaHealth.classList.toggle("positive", connected);
+}
+
+function prettyRegime(value) {
+  return String(value || "Awaiting analysis").replaceAll("_", " ");
+}
+
+function renderRegime(report) {
+  const latest = report.latest_observation;
+  const threshold = Number(report.minimum_closed_trades || 30);
+  elements.regimeCurrent.textContent = latest ? prettyRegime(latest.regime) : "Awaiting Dhan analysis";
+  elements.regimeCurrent.classList.toggle("ready", Boolean(latest && latest.regime !== "NO_TRADE"));
+  elements.regimeConfidence.textContent = latest ? `${Number(latest.confidence || 0).toFixed(0)}%` : "—";
+  elements.regimeProfile.textContent = latest ? latest.routed_strategy_id : "—";
+  const bestSample = Math.max(0, ...report.recommendations.map((item) => Number(item.closed_trades || 0)));
+  elements.regimeSample.textContent = `${number(bestSample)} trades`;
+  elements.regimeThreshold.textContent = `${number(threshold)} closed`;
+  elements.regimeRouting.textContent = latest
+    ? latest.routing_reason
+    : "Each fresh market analysis is classified and saved with its strategy. A candidate can be routed only in Paper Trade mode after it proves itself in the same regime.";
+  elements.regimePerformanceList.replaceChildren();
+  const rows = report.strategy_performance || [];
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No closed trades have regime labels yet. New paper trades will be linked to the market regime at entry.";
+    elements.regimePerformanceList.append(empty);
+    return;
+  }
+  rows.forEach((item) => {
+    const card = document.createElement("article");
+    card.className = "outcome-card";
+    const title = document.createElement("h3");
+    title.textContent = `${prettyRegime(item.regime)} · ${item.strategy_id}`;
+    const detail = document.createElement("p");
+    detail.className = "profile-evidence";
+    detail.textContent = `${number(item.closed_trades)} trades · ${currency(item.net_pnl)} net · ${Number(item.win_rate_pct || 0).toFixed(0)}% win · PF ${item.profit_factor == null ? "—" : Number(item.profit_factor).toFixed(2)}`;
+    card.append(title, detail);
+    elements.regimePerformanceList.append(card);
+  });
+}
+
+function renderExecution(mode, auto, attempts) {
+  const real = mode.mode === "REAL";
+  elements.executionMode.textContent = real ? "Real Trade armed" : "Paper Trade active";
+  elements.executionMode.classList.toggle("ready", !real);
+  elements.executionDetail.textContent = real
+    ? "Real mode is armed. Only a new eligible signal can submit a Dhan Super Order. Use Paper Trade to disarm immediately."
+    : "Paper mode is active. The backend always starts in Paper Trade mode after a restart.";
+  elements.paperModeButton.classList.toggle("active", !real);
+  elements.realModeButton.classList.toggle("active", real);
+  elements.sidebarExecutionText.textContent = real
+    ? "Real mode armed: the next eligible automated entry submits a protected Dhan Super Order."
+    : "Paper mode: orders are simulated for review and forward testing.";
+  elements.sidebarExecutionNote.classList.toggle("real-armed", real);
+  elements.autoTraderStatus.textContent = auto.enabled
+    ? (auto.in_session ? "Running" : "Enabled — waiting for NSE session")
+    : "Paused";
+  elements.autoTraderReason.textContent = auto.last_reason || "No attempt recorded in this session.";
+  const last = attempts[0];
+  elements.autoTraderAttempt.textContent = last
+    ? `${last.outcome}: ${last.reason}`
+    : "No durable attempts yet.";
+}
+
+async function chooseExecutionMode(mode) {
+  if (mode === "REAL") {
+    elements.realModePhrase.value = "";
+    elements.realModeConfirm.disabled = true;
+    elements.realModeConfirmation.hidden = false;
+    elements.realModePhrase.focus();
+    return;
+  }
+  await setExecutionMode(mode, "");
+}
+
+async function setExecutionMode(mode, confirmation) {
+  try {
+    await post("/execution/mode", { mode, confirmation });
+    await refreshDashboard();
+  } catch (error) {
+    window.alert(`Could not change execution mode: ${error.message}`);
+  }
+}
+
+function closeRealModeConfirmation() {
+  elements.realModeConfirmation.hidden = true;
+  elements.realModePhrase.value = "";
+  elements.realModeConfirm.disabled = true;
+}
+
 function renderContextShadow(summary, outcomes) {
   elements.contextEvaluated.textContent = number(summary.total_evaluations);
   elements.contextAllow.textContent = number(summary.would_allow);
@@ -159,11 +296,12 @@ function renderProfiles(profiles, evaluations, activeProfile) {
     const description = fragment.querySelector(".profile-description");
     const evidence = fragment.querySelector(".profile-evidence");
     const outcome = fragment.querySelector(".profile-outcome");
+    const trialButton = fragment.querySelector(".profile-trial-button");
     const isActive = activeProfile.id === profile.id;
     const eligible = evaluation?.eligible_for_paper_promotion;
 
     title.textContent = profile.name;
-    badge.textContent = isActive ? "Active" : profile.baseline ? "Reference" : "Candidate";
+    badge.textContent = isActive ? "Active" : profile.baseline ? "Reference" : profile.paper_trial_only ? "Paper trial" : "Candidate";
     badge.classList.toggle("active", isActive);
     description.textContent = profile.description;
     if (evaluation) {
@@ -176,8 +314,66 @@ function renderProfiles(profiles, evaluations, activeProfile) {
       outcome.textContent = "Under review";
     }
     root.classList.toggle("is-active", isActive);
+    if (profile.paper_trial_only) {
+      trialButton.hidden = false;
+      trialButton.dataset.profileId = profile.id;
+      trialButton.dataset.action = isActive ? "end" : "start";
+      trialButton.textContent = isActive ? "End paper trial" : "Start paper trial";
+      if (isActive) {
+        outcome.textContent = `Running paper-only — ${Number(profile.paper_stop_loss_fraction || 0) * 100}% stop / ${Number(profile.paper_target_fraction || 0) * 100}% target`;
+      }
+    }
     elements.profileList.append(fragment);
   });
+}
+
+async function startPaperTrial(profileId, button, action) {
+  button.disabled = true;
+  button.textContent = action === "end" ? "Ending…" : "Starting…";
+  try {
+    const path = action === "end"
+      ? "/learning/end-paper-trial"
+      : `/learning/profiles/${encodeURIComponent(profileId)}/start-paper-trial`;
+    await post(path, {});
+    await refreshDashboard();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = error.message;
+  }
+}
+
+function renderCandidateResearch(report) {
+  elements.candidateResearchResults.replaceChildren();
+  elements.candidateResearchDetail.textContent = `${report.evidence_rule} ${report.execution_rule}`;
+  report.candidates.forEach((candidate) => {
+    const card = document.createElement("article");
+    card.className = "outcome-card";
+    const title = document.createElement("h3");
+    title.textContent = candidate.label;
+    const detail = document.createElement("p");
+    detail.className = "profile-evidence";
+    detail.textContent = `In-sample ${currency(candidate.in_sample.net_pnl)} · PF ${candidate.in_sample.profit_factor == null ? "—" : Number(candidate.in_sample.profit_factor).toFixed(2)} | Holdout ${currency(candidate.holdout.net_pnl)} · PF ${candidate.holdout.profit_factor == null ? "—" : Number(candidate.holdout.profit_factor).toFixed(2)} · ${number(candidate.holdout.trades)} trades`;
+    const decision = document.createElement("p");
+    decision.className = candidate.eligible_for_paper_trial ? "profile-outcome eligible" : "profile-outcome";
+    decision.textContent = candidate.eligible_for_paper_trial
+      ? "Eligible for a controlled forward-paper trial"
+      : (candidate.reasons[0] || "Under review");
+    card.append(title, detail, decision);
+    elements.candidateResearchResults.append(card);
+  });
+}
+
+async function runCandidateResearch() {
+  elements.candidateResearchButton.disabled = true;
+  elements.candidateResearchButton.textContent = "Testing…";
+  try {
+    renderCandidateResearch(await post("/research/candidates/run", {}));
+  } catch (error) {
+    elements.candidateResearchDetail.textContent = `Candidate research could not run: ${error.message}`;
+  } finally {
+    elements.candidateResearchButton.disabled = false;
+    elements.candidateResearchButton.textContent = "Run candidate research";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -478,13 +674,29 @@ function renderAlerts(alerts) {
   elements.telegramStatus.classList.toggle("positive", configured);
 }
 
+async function startBreakoutRetestMonitor(side, button) {
+  button.disabled = true;
+  button.textContent = "Connecting…";
+  try {
+    const session = await post("/scalping/breakout-retest/start-paper", { option_side: side });
+    elements.retestMonitorStatus.textContent = `${side} live`;
+    elements.retestMonitorStatus.classList.add("ready");
+    elements.retestMonitorDetail.textContent = `${side} monitor is using the current ATM ${session.configuration.option_side} contract and evaluates its bid/ask every ${session.configuration.evaluation_interval_seconds} seconds. It requires premium momentum confirmation and records paper-only entries with a 5% stop / 10% target.`;
+    button.textContent = `${side} monitor running`;
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = `Start ${side} monitor`;
+    elements.retestMonitorDetail.textContent = `Could not start the ${side} monitor: ${error.message}`;
+  }
+}
+
 async function refreshDashboard() {
   elements.refreshButton.disabled = true;
   elements.refreshButton.textContent = "Refreshing…";
   try {
     const health = await getHealth();
     setConnected(health);
-    const [dhan, activeProfile, profiles, paper, instruments, contextShadow, contextOutcomes, alerts] = await Promise.all([
+    const [dhan, activeProfile, profiles, paper, instruments, contextShadow, contextOutcomes, alerts, mode, auto, attempts, ollama, ollamaReport, regimeReport] = await Promise.all([
       get("/dhan/status"),
       get("/learning/active-profile"),
       get("/learning/profiles"),
@@ -493,6 +705,12 @@ async function refreshDashboard() {
       get("/reports/context-shadow"),
       get("/reports/context-outcomes"),
       get("/alerts/status").catch(() => null),
+      get("/execution/mode"),
+      get("/auto/status"),
+      get("/auto/attempts").catch(() => []),
+      get("/ollama/status").catch(() => ({ enabled: false, available: false, model: "Ollama", last_error: "Ollama status is unavailable." })),
+      get("/reports/ollama").catch(() => ({ total_reviews: 0, allow_count: 0, review_count: 0, skip_count: 0, linked_closed_trades: 0, linked_net_pnl: 0 })),
+      get("/reports/regime-performance").catch(() => ({ latest_observation: null, strategy_performance: [], recommendations: [], minimum_closed_trades: 30 })),
     ]);
     const evaluations = await Promise.all(
       profiles.map((profile) => get(`/learning/profiles/${encodeURIComponent(profile.id)}/evaluation`).catch(() => null)),
@@ -500,6 +718,9 @@ async function refreshDashboard() {
     renderHealth(health, dhan, instruments, activeProfile);
     renderAlerts(alerts);
     renderPaperPerformance(paper);
+    renderOllama(ollama, ollamaReport);
+    renderRegime(regimeReport);
+    renderExecution(mode, auto, attempts);
     renderContextShadow(contextShadow, contextOutcomes);
     renderOutcomeResearch(contextOutcomes);
     renderProfiles(profiles, evaluations.filter(Boolean), activeProfile);
@@ -514,7 +735,25 @@ async function refreshDashboard() {
 }
 
 elements.refreshButton.addEventListener("click", refreshDashboard);
+elements.paperModeButton.addEventListener("click", () => chooseExecutionMode("PAPER"));
+elements.realModeButton.addEventListener("click", () => chooseExecutionMode("REAL"));
+elements.realModePhrase.addEventListener("input", () => {
+  elements.realModeConfirm.disabled = elements.realModePhrase.value !== "ENABLE REAL TRADING";
+});
+elements.realModeCancel.addEventListener("click", closeRealModeConfirmation);
+elements.realModeConfirm.addEventListener("click", async () => {
+  const confirmation = elements.realModePhrase.value;
+  closeRealModeConfirmation();
+  await setExecutionMode("REAL", confirmation);
+});
 elements.runBacktestButton.addEventListener("click", runBacktestNow);
+elements.candidateResearchButton.addEventListener("click", runCandidateResearch);
+elements.retestCeButton.addEventListener("click", () => startBreakoutRetestMonitor("CE", elements.retestCeButton));
+elements.retestPeButton.addEventListener("click", () => startBreakoutRetestMonitor("PE", elements.retestPeButton));
+elements.profileList.addEventListener("click", (event) => {
+  const button = event.target.closest(".profile-trial-button");
+  if (button?.dataset.profileId) startPaperTrial(button.dataset.profileId, button, button.dataset.action);
+});
 elements.historySource.addEventListener("change", () => {
   historyState.selected = elements.historySource.value;
   showSelectedHistory();

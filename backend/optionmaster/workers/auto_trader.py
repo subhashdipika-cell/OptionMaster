@@ -31,6 +31,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
 IST = timezone(timedelta(hours=5, minutes=30))
 STATE_FILE = Path("data") / "auto_trader.json"
@@ -109,6 +110,9 @@ def status() -> dict:
 
 def _max_trades() -> int:
     from optionmaster.config import get_settings
+    from optionmaster import main as app
+    if app.strategy_profiles.active().id == "paper-orb-vwap-v1":
+        return 1
     return get_settings().auto_max_trades_per_day
 
 
@@ -175,12 +179,17 @@ def _try_entry(today: str) -> None:
 
     from optionmaster import main as app  # late: avoid circular import
     from optionmaster.config import get_settings
+    from optionmaster.journal.store import EntryAttempt
     from optionmaster.paper.models import CreatePaperTradeRequest
     settings = get_settings()
 
     expiry = _pick_expiry()
     if expiry is None:
         _last_reason = "no non-0DTE expiry available"
+        app.journal.record_entry_attempt(EntryAttempt(
+            id=uuid4().hex, recorded_at=datetime.now(timezone.utc), mode=app.execution_mode_store.get().mode.value,
+            outcome="DECLINED", reason=_last_reason, symbol=settings.auto_symbol,
+        ))
         return
 
     request = CreatePaperTradeRequest(
@@ -191,6 +200,9 @@ def _try_entry(today: str) -> None:
         expiry=expiry,
         lots=settings.auto_lots,
         capital=settings.auto_capital,
+        max_risk_fraction=settings.auto_max_risk_fraction,
+        daily_loss_fraction=settings.auto_daily_loss_fraction,
+        max_premium_fraction=settings.auto_max_premium_fraction,
     )
 
     # One Dhan account = one shared rate bucket (~1 option-chain call / 3s),
@@ -202,7 +214,13 @@ def _try_entry(today: str) -> None:
     last_exc: Exception | None = None
     for attempt in range(CHAIN_RETRIES):
         try:
-            decision = app.create_dhan_paper_trade(request)
+            # The ORB/VWAP profile owns its own M1/M5 setup evaluator. It is
+            # always paper-only and deliberately does not use the real-order route.
+            decision = (
+                app.create_orb_vwap_paper_trade(request)
+                if app.strategy_profiles.active().id == "paper-orb-vwap-v1"
+                else app.create_automated_trade(request)
+            )
             break
         except Exception as exc:
             last_exc = exc
@@ -214,15 +232,34 @@ def _try_entry(today: str) -> None:
         # the full ENTRY_RETRY_SECONDS slot on someone else's traffic.
         _last_attempt = time.time() - ENTRY_RETRY_SECONDS + 60
         _last_reason = f"chain unavailable after {CHAIN_RETRIES} tries: {last_exc}"
+        app.journal.record_entry_attempt(EntryAttempt(
+            id=uuid4().hex, recorded_at=datetime.now(timezone.utc), mode=app.execution_mode_store.get().mode.value,
+            outcome="FAILED", reason=_last_reason, symbol=settings.auto_symbol, expiry=expiry,
+        ))
         print(f"[AutoTrader] {_last_reason}")
         return
 
     _last_reason = decision.reason
+    signal = decision.analysis.signal
+    app.journal.record_entry_attempt(EntryAttempt(
+        id=uuid4().hex, recorded_at=datetime.now(timezone.utc), mode=app.execution_mode_store.get().mode.value,
+        outcome=("OPENED" if decision.accepted else "DECLINED"), reason=decision.reason,
+        symbol=settings.auto_symbol, expiry=expiry,
+        side=signal.side.value if signal.side is not None else None,
+        strike=signal.strike,
+        quantity=(decision.trade.quantity if getattr(decision, "trade", None) is not None else None),
+        order_id=getattr(decision, "order_id", None),
+    ))
     if decision.accepted:
         _save(day=today, entries=_entries_today(today) + 1)
-        print(f"[AutoTrader] OPENED paper trade: {decision.trade.symbol} "
-              f"{decision.trade.strike} {decision.trade.side} x{decision.trade.quantity} "
-              f"@ {decision.trade.entry_price} (expiry {expiry})")
+        paper_trade = getattr(decision, "trade", None)
+        if paper_trade is not None:
+            print(f"[AutoTrader] OPENED paper trade: {paper_trade.symbol} "
+                  f"{paper_trade.strike} {paper_trade.side} x{paper_trade.quantity} "
+                  f"@ {paper_trade.entry_price} (expiry {expiry})")
+        else:
+            print(f"[AutoTrader] SUBMITTED real Super Order: {decision.order_id} "
+                  f"({decision.order_status}, expiry {expiry})")
     else:
         print(f"[AutoTrader] gate declined: {decision.reason}")
 

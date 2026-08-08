@@ -3,7 +3,7 @@ import hashlib
 import io
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -75,6 +75,27 @@ class NseScripMaster:
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 return None
         return None
+
+    def ensure_current(self, *, max_age: timedelta = timedelta(days=1)) -> ScripMasterSummary:
+        """Load a usable cached master, refreshing it when absent or older than a day."""
+        try:
+            summary = self.load_cached()
+        except ScripMasterError:
+            return self.refresh()
+        try:
+            fetched_at = datetime.fromisoformat(summary.fetched_at)
+            if fetched_at.tzinfo is None:
+                fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return self.refresh()
+        if datetime.now(timezone.utc) - fetched_at > max_age:
+            try:
+                return self.refresh()
+            except ScripMasterError:
+                # A previously valid master is safer than failing every entry
+                # simply because the download endpoint is temporarily down.
+                return summary
+        return summary
 
     def lot_size_for_security(self, security_id: int) -> int:
         if self._lot_by_security_id is None:

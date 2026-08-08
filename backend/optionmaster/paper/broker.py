@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import RLock
 
 from optionmaster.costs.calculator import NseOptionCostCalculator
@@ -9,6 +9,9 @@ from optionmaster.paper.models import CreatePaperTradeRequest, PaperTrade, Paper
 
 class PaperTradeRejected(ValueError):
     """Raised when a paper order does not pass the safety gates."""
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class PaperBroker:
@@ -61,30 +64,14 @@ class PaperBroker:
             ),
             None,
         )
-        if quote is None or quote.ask <= 0 or quote.bid <= 0:
-            raise PaperTradeRejected("Selected option has no usable bid/ask quote.")
-
-        entry = quote.ask  # buyer pays the displayed ask in the simulation
-        stop_loss = round(entry * (1 - request.stop_loss_fraction), 2)
-        target = round(entry * (1 + request.target_fraction), 2)
-        premium_paid = round(entry * quantity, 2)
-        initial_costs = self._costs.round_trip(
-            entry_price=entry, exit_price=entry, quantity=quantity,
-            underlying=request.symbol,
+        entry, stop_loss, target, premium_paid, maximum_risk, initial_costs = self.entry_risk_check(
+            request=request, quote=quote, quantity=quantity
         )
-        costs_at_stop = self._costs.round_trip(
-            entry_price=entry, exit_price=stop_loss, quantity=quantity,
-            underlying=request.symbol,
-        )
-        maximum_risk = round((entry - stop_loss) * quantity + costs_at_stop.total, 2)
-        if premium_paid + initial_costs.entry.total > request.capital * request.max_premium_fraction:
-            raise PaperTradeRejected("Premium outlay exceeds the configured capital allocation limit.")
-        if maximum_risk > request.capital * request.max_risk_fraction:
-            raise PaperTradeRejected("Stop-loss risk exceeds the configured per-trade risk limit.")
 
         trade = PaperTrade(
             symbol=request.symbol.upper(),
             strategy_id=strategy_id,
+            regime=signal.regime,
             context_decision_id=context_decision_id,
             underlying_security_id=request.security_id,
             underlying_segment=request.segment,
@@ -113,6 +100,57 @@ class PaperBroker:
         if self._notifier is not None:
             self._notifier.notify_open(trade)
         return trade
+
+    def entry_risk_check(
+        self,
+        *,
+        request: CreatePaperTradeRequest,
+        quote,
+        quantity: int,
+    ) -> tuple[float, float, float, float, float, object]:
+        """Validate one exchange-lot entry without opening a simulated position.
+
+        Paper and real execution share this check so premium and stop-loss
+        limits remain in force regardless of the selected execution mode.
+        """
+        if self._daily_realized_net_pnl() <= -(request.capital * request.daily_loss_fraction):
+            raise PaperTradeRejected("Daily loss limit has been reached; new entries are locked for today.")
+        if quote is None or quote.ask <= 0 or quote.bid <= 0:
+            raise PaperTradeRejected("Selected option has no usable bid/ask quote.")
+        entry = quote.ask
+        stop_loss = round(entry * (1 - request.stop_loss_fraction), 2)
+        target = round(entry * (1 + request.target_fraction), 2)
+        premium_paid = round(entry * quantity, 2)
+        initial_costs = self._costs.round_trip(
+            entry_price=entry, exit_price=entry, quantity=quantity,
+            underlying=request.symbol,
+        )
+        costs_at_stop = self._costs.round_trip(
+            entry_price=entry, exit_price=stop_loss, quantity=quantity,
+            underlying=request.symbol,
+        )
+        maximum_risk = round((entry - stop_loss) * quantity + costs_at_stop.total, 2)
+        if premium_paid + initial_costs.entry.total > request.capital * request.max_premium_fraction:
+            raise PaperTradeRejected("Premium outlay exceeds the configured capital allocation limit.")
+        if maximum_risk > request.capital * request.max_risk_fraction:
+            raise PaperTradeRejected("Stop-loss risk exceeds the configured per-trade risk limit.")
+        return entry, stop_loss, target, premium_paid, maximum_risk, initial_costs
+
+    def _daily_realized_net_pnl(self) -> float:
+        """Net closed paper P&L for the current NSE trading date, including restarts."""
+        if self._journal is None:
+            return 0.0
+        today = datetime.now(IST).date()
+        total = 0.0
+        for trade in self._journal.list_paper_trades():
+            if trade.closed_at is None or trade.realized_pnl is None:
+                continue
+            closed = trade.closed_at
+            if closed.tzinfo is None:
+                closed = closed.replace(tzinfo=timezone.utc)
+            if closed.astimezone(IST).date() == today:
+                total += trade.realized_pnl
+        return round(total, 2)
 
     def mark_to_market(self, trade_id: str, snapshot: MarketSnapshot) -> PaperTrade:
         with self._lock:

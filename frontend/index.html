@@ -5,11 +5,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#071425" />
     <title>OptionMaster | Paper Trading Intelligence</title>
-    <link rel="stylesheet" href="styles.css?v=20260720" />
+    <link rel="stylesheet" href="styles.css?v=20260807g" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
     <div class="ambient ambient-two"></div>
+
+    <div class="confirmation-modal" id="real-mode-confirmation" hidden role="dialog" aria-modal="true" aria-labelledby="real-mode-title">
+      <div class="confirmation-card">
+        <p class="eyebrow">REAL TRADE CONFIRMATION</p>
+        <h2 id="real-mode-title">Arm live Dhan orders?</h2>
+        <p>Real mode allows the next eligible automated signal to submit a protected Dhan Super Order. It does not place an order immediately.</p>
+        <label for="real-mode-phrase">Type <strong>ENABLE REAL TRADING</strong> to continue</label>
+        <input id="real-mode-phrase" type="text" autocomplete="off" spellcheck="false" placeholder="ENABLE REAL TRADING" />
+        <div class="confirmation-actions">
+          <button class="button button-secondary" id="real-mode-cancel" type="button">Cancel</button>
+          <button class="button execution-button real" id="real-mode-confirm" type="button" disabled>Arm Real Trade</button>
+        </div>
+      </div>
+    </div>
 
     <header class="topbar">
       <a class="brand" href="#top" aria-label="OptionMaster dashboard home">
@@ -32,9 +46,9 @@
           <a class="nav-link" href="#learning">Learning guardrail</a>
           <a class="nav-link" href="#system">System health</a>
         </nav>
-        <div class="sidebar-note">
+        <div class="sidebar-note" id="sidebar-execution-note">
           <span class="note-icon">✓</span>
-          <p>Orders are not placed from this dashboard. It is designed for review and paper-test discipline.</p>
+          <p id="sidebar-execution-text">Paper mode: orders are simulated for review and forward testing.</p>
         </div>
       </aside>
 
@@ -74,6 +88,43 @@
           </article>
         </section>
 
+        <section class="panel execution-panel" aria-label="Execution control">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">EXECUTION CONTROL</p>
+              <h2>Choose how eligible trades are handled</h2>
+            </div>
+            <span class="pill neutral" id="execution-mode">Loading mode</span>
+          </div>
+          <p class="section-copy">Paper Trade simulates entries and costs. Real Trade sends an eligible option-buying entry to Dhan as a protected Super Order with target, stop-loss, and trailing protection. Switching to Real does not place an order immediately; the next eligible automated signal does.</p>
+          <div class="execution-actions">
+            <button class="button execution-button active" id="paper-mode-button" type="button">Paper Trade</button>
+            <button class="button execution-button real" id="real-mode-button" type="button">Real Trade</button>
+          </div>
+          <div class="execution-grid">
+            <div><span>Auto trader</span><strong id="auto-trader-status">Loading</strong></div>
+            <div><span>Latest blocker</span><strong id="auto-trader-reason">Loading</strong></div>
+            <div><span>Last decision</span><strong id="auto-trader-attempt">Loading</strong></div>
+          </div>
+          <p class="fine-print" id="execution-detail">The backend starts in Paper Trade mode after every restart.</p>
+        </section>
+
+        <section class="panel retest-monitor-panel" aria-label="15-second breakout retest paper monitor">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">LIVE PAPER RESEARCH</p>
+              <h2>5-minute three-bar breakout–retest monitor</h2>
+            </div>
+            <span class="pill neutral" id="retest-monitor-status">Research withheld</span>
+          </div>
+          <p class="section-copy" id="retest-monitor-detail">The exact three-bar version was negative in the cost-aware NIFTY and BANKNIFTY replay. Its 15-second monitor is retained for research, but it is not enabled for forward-paper trading.</p>
+          <div class="execution-actions">
+            <button class="button execution-button" id="retest-ce-button" type="button" disabled>CE research withheld</button>
+            <button class="button execution-button" id="retest-pe-button" type="button" disabled>PE research withheld</button>
+          </div>
+          <p class="fine-print">Paper risk is fixed at 5% option-premium stop / 10% target. Start both monitors to observe either direction. This feature never sends an order to Dhan.</p>
+        </section>
+
         <section class="shadow-strip" aria-label="Shadow context filter status">
           <div class="shadow-intro">
             <p class="eyebrow">SHADOW CONTEXT FILTER</p>
@@ -85,6 +136,41 @@
           <div class="shadow-metric"><span>Would skip</span><strong class="negative" id="context-skip">—</strong></div>
           <div class="shadow-metric"><span>Outcome links</span><strong id="context-outcomes">—</strong></div>
           <div class="shadow-metric"><span>Avg. confluence</span><strong id="context-confluence">—</strong></div>
+        </section>
+
+        <section class="panel ollama-panel" aria-label="Local Ollama reviewer">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">LOCAL AI REVIEWER</p>
+              <h2>Ollama setup research</h2>
+            </div>
+            <span class="pill neutral" id="ollama-status">Checking Ollama</span>
+          </div>
+          <p class="section-copy" id="ollama-detail">Ollama reviews directional paper setups locally and stores its reasoning with the eventual outcome. It cannot place or block an order.</p>
+          <div class="evidence-grid ollama-metrics">
+            <div class="metric-block"><span>Reviews</span><strong id="ollama-reviews">—</strong></div>
+            <div class="metric-block"><span>Allow</span><strong id="ollama-allow">—</strong></div>
+            <div class="metric-block"><span>Review / Skip</span><strong id="ollama-caution">—</strong></div>
+            <div class="metric-block"><span>Linked outcomes</span><strong id="ollama-outcomes">—</strong></div>
+          </div>
+        </section>
+
+        <section class="panel regime-panel" aria-label="Market regime and strategy routing">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">REGIME-AWARE PAPER ROUTING</p>
+              <h2>Match the strategy to the market</h2>
+            </div>
+            <span class="pill neutral" id="regime-current">Awaiting Dhan analysis</span>
+          </div>
+          <p class="section-copy" id="regime-routing">Each fresh market analysis is classified and saved with its strategy. A candidate can be routed only in Paper Trade mode after it proves itself in the same regime.</p>
+          <div class="evidence-grid regime-metrics">
+            <div class="metric-block"><span>Classification confidence</span><strong id="regime-confidence">—</strong></div>
+            <div class="metric-block"><span>Routed profile</span><strong id="regime-profile">—</strong></div>
+            <div class="metric-block"><span>Best regime sample</span><strong id="regime-sample">—</strong></div>
+            <div class="metric-block"><span>Evidence threshold</span><strong id="regime-threshold">—</strong></div>
+          </div>
+          <div class="outcome-grid" id="regime-performance-list" aria-live="polite"></div>
         </section>
 
         <section class="panel outcome-panel" id="context-research">
@@ -138,10 +224,11 @@
               <select class="history-select" id="history-source" aria-label="History source">
                 <option value="paper">Paper trades</option>
               </select>
-              <select class="history-select" id="backtest-strategy" aria-label="Backtest strategy">
-                <option value="stored-scalp-v1">Momentum scalp (stored-scalp-v1)</option>
-                <option value="stored-reversal-v1">Sweep reversal (stored-reversal-v1)</option>
-              </select>
+                <select class="history-select" id="backtest-strategy" aria-label="Backtest strategy">
+                  <option value="stored-scalp-v1">Momentum scalp (stored-scalp-v1)</option>
+                  <option value="stored-reversal-v1">Sweep reversal (stored-reversal-v1)</option>
+                  <option value="stored-orb-vwap-v1">ORB + VWAP research (stored-orb-vwap-v1)</option>
+                </select>
               <button class="button" id="run-backtest-button" type="button">Run backtest</button>
             </div>
           </div>
@@ -186,6 +273,18 @@
           </div>
         </section>
 
+        <section class="panel outcome-panel" aria-label="AI candidate research">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">AI RESEARCH LAB</p>
+              <h2>Test candidates before trusting them</h2>
+            </div>
+            <button class="button" id="candidate-research-button" type="button">Run candidate research</button>
+          </div>
+          <p class="section-copy" id="candidate-research-detail">Runs a fixed, documented momentum and reversal candidate set against stored Dhan data. Every candidate must survive a chronological holdout before it can start a forward-paper trial.</p>
+          <div class="outcome-grid" id="candidate-research-results" aria-live="polite"></div>
+        </section>
+
         <section class="bottom-grid" id="system">
           <article class="panel readiness-panel">
             <div class="section-heading compact">
@@ -199,6 +298,7 @@
               <div><dt>Backend version</dt><dd id="health-version">—</dd></div>
               <div><dt>NSE instrument master</dt><dd id="instrument-status">—</dd></div>
               <div><dt>Telegram alerts</dt><dd id="telegram-status">—</dd></div>
+              <div><dt>Ollama reviewer</dt><dd id="ollama-health">—</dd></div>
               <div><dt>Reserved frontend port</dt><dd>5275</dd></div>
             </dl>
           </article>
@@ -223,7 +323,10 @@
           <p class="profile-description"></p>
           <p class="profile-evidence"></p>
         </div>
-        <div class="profile-outcome"></div>
+        <div class="profile-side">
+          <div class="profile-outcome"></div>
+          <button class="button profile-trial-button" type="button" hidden>Start paper trial</button>
+        </div>
       </article>
     </template>
 
@@ -234,6 +337,6 @@
       </article>
     </template>
 
-    <script src="app.js?v=20260720" defer></script>
+    <script src="app.js?v=20260807g" defer></script>
   </body>
 </html>

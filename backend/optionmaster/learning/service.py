@@ -36,6 +36,10 @@ class PaperPromotionRejected(ValueError):
     """Raised when forward-paper evidence is insufficient for a profile change."""
 
 
+class PaperTrialRejected(ValueError):
+    """Raised when a profile is not explicitly designated for paper trial use."""
+
+
 class StrategyProfileRegistry:
     """Small, explicit profile catalogue; the active ID is persisted in the trade journal."""
 
@@ -64,6 +68,13 @@ class StrategyProfileRegistry:
         profile = self.get(profile_id)
         self._journal.set_active_strategy_id(profile.id)
         return profile
+
+    def start_paper_trial(self, profile_id: str) -> StrategyProfile:
+        """Activate a deliberately paper-only profile without calling it a promotion."""
+        profile = self.get(profile_id)
+        if not profile.paper_trial_only:
+            raise PaperTrialRejected("Only designated paper-trial profiles can be started this way.")
+        return self.activate(profile.id)
 
 
 class LearningService:

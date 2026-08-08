@@ -41,8 +41,8 @@ if errorlevel 1 (
 )
 
 timeout /t 2 /nobreak >nul
-start "" "http://127.0.0.1:%FRONTEND_PORT%"
+start "" "http://127.0.0.1:%FRONTEND_PORT%/?build=20260807g"
 
 echo.
-echo OptionMaster is available at http://127.0.0.1:%FRONTEND_PORT%
+echo OptionMaster is available at http://127.0.0.1:%FRONTEND_PORT%/?build=20260807g
 endlocal

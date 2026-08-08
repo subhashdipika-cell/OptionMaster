@@ -48,7 +48,16 @@ class Settings(BaseSettings):
     auto_instrument_type: str = "INDEX"
     auto_lots: int = 1
     auto_capital: float = 100_000.0
+    auto_max_risk_fraction: float = 0.02
+    auto_daily_loss_fraction: float = 0.05
+    auto_max_premium_fraction: float = 0.30
     auto_max_trades_per_day: int = 3
+
+    # Local Ollama reviewer: research-only; never an execution authority.
+    ollama_enabled: bool = True
+    ollama_host: str = "http://127.0.0.1:11434"
+    ollama_model: str = "qwen2.5:latest"
+    ollama_timeout_seconds: float = 60.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

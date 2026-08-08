@@ -5,7 +5,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from optionmaster.costs.calculator import RoundTripCosts
-from optionmaster.market.models import AnalysisResult, OptionSide
+from optionmaster.market.models import AnalysisResult, OptionSide, Regime
 
 
 class PaperTradeStatus(StrEnum):
@@ -30,14 +30,17 @@ class CreatePaperTradeRequest(BaseModel):
     capital: float = Field(gt=0, description="Paper-trading capital in rupees.")
     stop_loss_fraction: float = Field(default=0.20, gt=0, le=0.50)
     target_fraction: float = Field(default=0.30, gt=0, le=1.00)
-    max_risk_fraction: float = Field(default=0.01, gt=0, le=0.02)
-    max_premium_fraction: float = Field(default=0.20, gt=0, le=0.50)
+    trailing_fraction: float = Field(default=0.10, gt=0, le=0.50)
+    max_risk_fraction: float = Field(default=0.02, gt=0, le=0.02)
+    daily_loss_fraction: float = Field(default=0.05, gt=0, le=0.10)
+    max_premium_fraction: float = Field(default=0.30, gt=0, le=0.50)
 
 
 class PaperTrade(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex)
     symbol: str
     strategy_id: str = "baseline-v1"
+    regime: Regime = Regime.NO_TRADE
     context_decision_id: str | None = None
     underlying_security_id: int
     underlying_segment: str
@@ -70,3 +73,15 @@ class PaperTradeDecision(BaseModel):
     reason: str
     analysis: AnalysisResult
     trade: PaperTrade | None = None
+
+
+class RealTradeDecision(BaseModel):
+    """Decision and broker acknowledgement for an explicitly armed real order."""
+
+    accepted: bool
+    reason: str
+    analysis: AnalysisResult
+    order_id: str | None = None
+    order_status: str | None = None
+    correlation_id: str | None = None
+    order_type: str | None = None

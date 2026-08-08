@@ -1,8 +1,11 @@
 from threading import RLock
 from uuid import uuid4
 
+from optionmaster.scalping.breakout_retest import BreakoutRetestScalpingEngine
 from optionmaster.scalping.engine import ScalpingEngine
-from optionmaster.scalping.models import MarketTick, ScalpingDecision, ScalpingSession, ScalpingSessionRequest
+from optionmaster.scalping.models import (
+    MarketTick, ScalpingDecision, ScalpingSession, ScalpingSessionRequest, ScalpingStrategy,
+)
 
 
 class ScalpingSessionManager:
@@ -15,7 +18,14 @@ class ScalpingSessionManager:
         session_id = uuid4().hex
         session = ScalpingSession(id=session_id, configuration=configuration)
         with self._lock:
-            self._engines[session_id] = ScalpingEngine(configuration)
+            self._engines[session_id] = (
+                BreakoutRetestScalpingEngine(configuration)
+                if configuration.strategy in (
+                    ScalpingStrategy.BREAKOUT_RETEST,
+                    ScalpingStrategy.BREAKOUT_RETEST_3_BAR,
+                )
+                else ScalpingEngine(configuration)
+            )
             self._sessions[session_id] = session
         return session
 
