@@ -37,6 +37,7 @@ from optionmaster.backtest.data import ChainSnapshot, StoredDay
 from optionmaster.backtest.scalper import SimulatedTrade, _parse_time
 from optionmaster.backtest.spot import SpotCandle, snapshot_at_or_after
 from optionmaster.costs.calculator import NseOptionCostCalculator
+from optionmaster.strategy.option_context import select_and_confirm
 
 
 class ReversalParams(BaseModel):
@@ -69,7 +70,7 @@ class ReversalParams(BaseModel):
     )
     entry_start: str = Field(default="09:30", pattern=r"^\d{2}:\d{2}$")
     entry_end: str = Field(default="14:30", pattern=r"^\d{2}:\d{2}$")
-    squareoff_time: str = Field(default="15:15", pattern=r"^\d{2}:\d{2}$")
+    squareoff_time: str = Field(default="15:12", pattern=r"^\d{2}:\d{2}$")
     max_spread_pct: float = Field(default=1.0, gt=0, le=5.0)
     min_premium: float = Field(default=20.0, ge=0)
     max_premium: float = Field(default=600.0, gt=0)
@@ -88,6 +89,9 @@ class ReversalParams(BaseModel):
             "Guards against pretending we could trade across a data hole."
         ),
     )
+    use_index_option_context: bool = True
+    minimum_option_delta: float = Field(default=0.25, gt=0, le=1)
+    maximum_option_delta: float = Field(default=0.65, gt=0, le=1)
 
 
 class _OpenPosition:
@@ -278,7 +282,14 @@ def simulate_day(
         )
         if snapshot is None:
             continue
-        strike = snapshot.atm_strike(side)
+        setup = select_and_confirm(
+            snapshots=snapshots, snapshot=snapshot,
+            candles=candles,
+            side=side, min_premium=params.min_premium, max_premium=params.max_premium,
+            max_spread_pct=params.max_spread_pct, min_delta=params.minimum_option_delta,
+            max_delta=params.maximum_option_delta, target_r=1.5,
+        ) if params.use_index_option_context else None
+        strike = setup.strike if setup else snapshot.atm_strike(side)
         if strike is None:
             continue
         quote = snapshot.quote(strike, side)
@@ -290,14 +301,14 @@ def simulate_day(
         if spread is None or spread > params.max_spread_pct:
             continue
 
-        entry_price = quote.ask
+        entry_price = setup.entry_price if setup else quote.ask
         position = _OpenPosition(
             side=side,
             strike=strike,
             entry_price=entry_price,
             entry_snapshot=snapshot,
-            stop_loss=round(entry_price * (1 - params.stop_loss_pct / 100), 2),
-            target=round(entry_price * (1 + params.target_pct / 100), 2),
+            stop_loss=setup.stop_loss if setup else round(entry_price * (1 - params.stop_loss_pct / 100), 2),
+            target=setup.target if setup else round(entry_price * (1 + params.target_pct / 100), 2),
             invalidation_level=level,
         )
         entry_candle_index = index

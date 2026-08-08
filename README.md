@@ -79,7 +79,7 @@ through a deterministic minute-scalp strategy (`stored-scalp-v1`):
 - Entry: spot momentum burst (≥ 0.16% over 3 minutes) with the ATM option
   premium and volume confirming, spread ≤ 1%, premium between ₹20 and ₹600
   (gamma-rich contracts only), entries 10:00–13:00 IST.
-- Exit: −10% stop, +15% target, 12-minute time stop, 15:15 square-off.
+- Exit: premium-structure stop/target, 12-minute time stop, 15:12 square-off.
 - Fills buy the stored ask and sell the stored bid; every trade carries the
   full NSE cost schedule.
 

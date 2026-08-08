@@ -78,6 +78,13 @@ class Signal(BaseModel):
     quantity: int = 0
     reason: str
     paper_only: bool = True
+    index_support: float | None = None
+    index_resistance: float | None = None
+    option_support: float | None = None
+    option_resistance: float | None = None
+    entry_price: float | None = None
+    stop_loss_price: float | None = None
+    target_price: float | None = None
 
 
 class AnalysisResult(BaseModel):

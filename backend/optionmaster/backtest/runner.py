@@ -1,8 +1,9 @@
 """Runs the stored-data backtests across symbols and days and aggregates results.
 
-Two strategies share this runner, selected by ``BacktestRunRequest.strategy``:
-``stored-scalp-v1`` (momentum, chain snapshots only) and ``stored-reversal-v1``
-(failed-breakdown sweep, which additionally needs M1 spot candles).
+The runner supports research replays selected by ``BacktestRunRequest.strategy``:
+stored momentum, failed-breakdown reversal, and opening-range/VWAP.  Only the
+first uses chain snapshots alone; the latter two use M1 spot candles for the
+signal and archived option quotes for conservative fills.
 """
 
 from datetime import date, datetime, timezone
@@ -12,13 +13,15 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from optionmaster.backtest.data import StoredDataRepository
+from optionmaster.backtest.orb_vwap import OrbVwapParams
+from optionmaster.backtest.orb_vwap import simulate_day as simulate_orb_vwap_day
 from optionmaster.backtest.reversal import ReversalParams
 from optionmaster.backtest.reversal import simulate_day as simulate_reversal_day
 from optionmaster.backtest.scalper import ScalpParams, SimulatedTrade, simulate_day
 from optionmaster.backtest.spot import SpotCandleRepository
 from optionmaster.costs.calculator import NseOptionCostCalculator
 
-StrategyName = Literal["stored-scalp-v1", "stored-reversal-v1"]
+StrategyName = Literal["stored-scalp-v1", "stored-reversal-v1", "stored-orb-vwap-v1"]
 
 
 class BacktestRunRequest(BaseModel):
@@ -34,14 +37,15 @@ class BacktestRunRequest(BaseModel):
     strategy: StrategyName = "stored-scalp-v1"
     params: ScalpParams = Field(default_factory=ScalpParams)
     reversal: ReversalParams = Field(default_factory=ReversalParams)
+    orb_vwap: OrbVwapParams = Field(default_factory=OrbVwapParams)
 
     @property
     def strategy_id(self) -> str:
-        return (
-            self.reversal.strategy_id
-            if self.strategy == "stored-reversal-v1"
-            else self.params.strategy_id
-        )
+        if self.strategy == "stored-reversal-v1":
+            return self.reversal.strategy_id
+        if self.strategy == "stored-orb-vwap-v1":
+            return self.orb_vwap.strategy_id
+        return self.params.strategy_id
 
 
 class BreakdownBucket(BaseModel):
@@ -122,9 +126,9 @@ def run_backtest(
     spot_repository: SpotCandleRepository | None = None,
 ) -> BacktestRun:
     wanted = {symbol.upper() for symbol in request.symbols} if request.symbols else None
-    is_reversal = request.strategy == "stored-reversal-v1"
-    if is_reversal and spot_repository is None:
-        raise ValueError("stored-reversal-v1 needs a SpotCandleRepository (M1 index candles).")
+    needs_spot = request.strategy in {"stored-reversal-v1", "stored-orb-vwap-v1"}
+    if needs_spot and spot_repository is None:
+        raise ValueError(f"{request.strategy} needs a SpotCandleRepository (M1 index candles).")
     trades: list[SimulatedTrade] = []
     tested_days = 0
     for symbol, day in repository.list_days():
@@ -139,7 +143,7 @@ def run_backtest(
         stored = repository.load_day(symbol, day)
         if stored is None or not stored.snapshots:
             continue
-        if is_reversal:
+        if needs_spot:
             assert spot_repository is not None
             candles = spot_repository.load_day(symbol, day)
             if not candles:
@@ -147,22 +151,18 @@ def run_backtest(
                 # signal is undefined, so the day is skipped rather than counted.
                 continue
             tested_days += 1
-            trades.extend(
-                simulate_reversal_day(
-                    stored,
-                    candles,
-                    request.reversal,
-                    lot_size=lot_sizes[symbol],
-                    lots=request.lots,
-                    calculator=calculator,
-                )
-            )
+            if request.strategy == "stored-reversal-v1":
+                trades.extend(simulate_reversal_day(stored, candles, request.reversal, lot_size=lot_sizes[symbol], lots=request.lots, calculator=calculator))
+            else:
+                trades.extend(simulate_orb_vwap_day(stored, candles, request.orb_vwap, lot_size=lot_sizes[symbol], lots=request.lots, calculator=calculator))
             continue
         tested_days += 1
+        candles = spot_repository.load_day(symbol, day) if spot_repository is not None else None
         trades.extend(
             simulate_day(
                 stored,
                 request.params,
+                candles=candles,
                 lot_size=lot_sizes[symbol],
                 lots=request.lots,
                 calculator=calculator,

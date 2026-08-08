@@ -33,6 +33,13 @@ class ChainQuote:
     prev_oi: float
     iv: float
     volume: float
+    delta: float = 0.0
+    theta: float = 0.0
+    vega: float = 0.0
+
+    @property
+    def oi_change(self) -> float:
+        return self.oi - self.prev_oi
 
     @property
     def spread_pct(self) -> float | None:
@@ -106,6 +113,9 @@ class StoredDataRepository:
                         prev_oi=float(row["prev_oi"] or 0),
                         iv=float(row["iv"] or 0),
                         volume=float(row["volume"] or 0),
+                        delta=float(row.get("delta") or 0),
+                        theta=float(row.get("theta") or 0),
+                        vega=float(row.get("vega") or 0),
                     )
                 except (KeyError, TypeError, ValueError):
                     continue

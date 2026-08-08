@@ -1,6 +1,32 @@
 from optionmaster.market.models import MarketFeatures, MarketSnapshot, OptionQuote, OptionSide, Regime, Signal
 from optionmaster.strategy.profiles import BASELINE_PROFILE, StrategyProfile
 
+_PREMIUM_HISTORY: dict[tuple[str, float, OptionSide], list[float]] = {}
+_HISTORY_DAY: dict[str, object] = {}
+
+
+def _premium_plan(snapshot: MarketSnapshot, quote: OptionQuote, *, target_r: float = 1.8):
+    day = snapshot.timestamp.date()
+    if _HISTORY_DAY.get(snapshot.symbol) != day:
+        for key in [item for item in _PREMIUM_HISTORY if item[0] == snapshot.symbol]:
+            _PREMIUM_HISTORY.pop(key, None)
+        _HISTORY_DAY[snapshot.symbol] = day
+    key = (snapshot.symbol, quote.strike, quote.side)
+    prior = _PREMIUM_HISTORY.setdefault(key, [])
+    before = prior[-12:]
+    prior.append(float(quote.ltp))
+    if len(before) < 3 or not all(value > 0 for value in before):
+        return None
+    support, resistance = min(before), max(before)
+    average = sum(before) / len(before)
+    move = max((max(before[i], before[i - 1]) - min(before[i], before[i - 1]) for i in range(1, len(before))), default=quote.ltp * 0.05)
+    trigger = resistance + move * 0.05
+    if quote.ltp < trigger or quote.ltp < average:
+        return None
+    stop = round(max(0.05, support - move * 0.20), 2)
+    risk = max(0.05, quote.ltp - stop)
+    return support, resistance, stop, round(quote.ask + risk * target_r, 2)
+
 
 def _candidate_score(
     quote: OptionQuote, features: MarketFeatures, profile: StrategyProfile = BASELINE_PROFILE
@@ -48,6 +74,13 @@ def select_signal(
 
     quote = max(candidates, key=lambda q: _candidate_score(q, features, profile))
     score = _candidate_score(quote, features, profile)
+    plan = _premium_plan(snapshot, quote)
+    if plan is None:
+        return Signal(
+            symbol=snapshot.symbol, timestamp=snapshot.timestamp, regime=regime,
+            strategy_id=profile.id, reason=f"{regime}: selected option is awaiting its own premium-chart breakout confirmation.",
+        )
+    premium_support, premium_resistance, stop, target = plan
     return Signal(
         symbol=snapshot.symbol,
         timestamp=snapshot.timestamp,
@@ -56,5 +89,7 @@ def select_signal(
         side=quote.side,
         strike=quote.strike,
         score=score,
-        reason=f"{regime}: selected {quote.side} by delta, liquidity, momentum, and OI change.",
+        reason=f"{regime}: selected {quote.side} by delta, liquidity, momentum, OI change, and premium-chart breakout.",
+        option_support=premium_support, option_resistance=premium_resistance,
+        entry_price=quote.ask, stop_loss_price=stop, target_price=target,
     )

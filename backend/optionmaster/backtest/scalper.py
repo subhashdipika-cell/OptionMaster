@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from optionmaster.backtest.data import ChainSnapshot, StoredDay
 from optionmaster.costs.calculator import NseOptionCostCalculator
+from optionmaster.strategy.option_context import select_and_confirm
 
 
 class ScalpParams(BaseModel):
@@ -41,7 +42,7 @@ class ScalpParams(BaseModel):
     max_hold_minutes: float = Field(default=12.0, ge=1.0, le=120.0)
     entry_start: str = Field(default="10:00", pattern=r"^\d{2}:\d{2}$")
     entry_end: str = Field(default="13:00", pattern=r"^\d{2}:\d{2}$")
-    squareoff_time: str = Field(default="15:15", pattern=r"^\d{2}:\d{2}$")
+    squareoff_time: str = Field(default="15:12", pattern=r"^\d{2}:\d{2}$")
     max_spread_pct: float = Field(default=1.0, gt=0, le=5.0)
     min_premium: float = Field(default=20.0, ge=0)
     max_premium: float = Field(
@@ -55,6 +56,9 @@ class ScalpParams(BaseModel):
     cooldown_minutes: float = Field(default=5.0, ge=0, le=60.0)
     max_trades_per_day: int = Field(default=6, ge=1, le=50)
     require_premium_confirmation: bool = True
+    use_index_option_context: bool = True
+    minimum_option_delta: float = Field(default=0.25, gt=0, le=1)
+    maximum_option_delta: float = Field(default=0.65, gt=0, le=1)
 
 
 class SimulatedTrade(BaseModel):
@@ -99,6 +103,7 @@ def simulate_day(
     day: StoredDay,
     params: ScalpParams,
     *,
+    candles=None,
     lot_size: int,
     lots: int = 1,
     calculator: NseOptionCostCalculator,
@@ -185,7 +190,15 @@ def simulate_day(
         if abs(momentum_pct) < params.momentum_threshold_pct:
             continue
         side = "CE" if momentum_pct > 0 else "PE"
-        strike = snapshot.atm_strike(side)
+        setup = select_and_confirm(
+            snapshots=snapshots, snapshot=snapshot,
+            candles=candles or [],
+            side=side, min_premium=params.min_premium, max_premium=params.max_premium,
+            max_spread_pct=params.max_spread_pct, min_delta=params.minimum_option_delta,
+            max_delta=params.maximum_option_delta, target_r=1.5,
+            require_confirmation=params.require_premium_confirmation,
+        ) if params.use_index_option_context and candles else None
+        strike = setup.strike if setup else snapshot.atm_strike(side)
         if strike is None:
             continue
         quote = snapshot.quote(strike, side)
@@ -202,14 +215,14 @@ def simulate_day(
                 continue
             if quote.ltp <= earlier.ltp or quote.volume <= earlier.volume:
                 continue
-        entry_price = quote.ask
+        entry_price = setup.entry_price if setup else quote.ask
         position = _OpenPosition(
             side=side,
             strike=strike,
             entry_price=entry_price,
             entry_snapshot=snapshot,
-            stop_loss=round(entry_price * (1 - params.stop_loss_pct / 100), 2),
-            target=round(entry_price * (1 + params.target_pct / 100), 2),
+            stop_loss=setup.stop_loss if setup else round(entry_price * (1 - params.stop_loss_pct / 100), 2),
+            target=setup.target if setup else round(entry_price * (1 + params.target_pct / 100), 2),
         )
 
     if position is not None:

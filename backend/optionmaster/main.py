@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -20,11 +22,19 @@ from optionmaster.context.models import (
     ContextEvaluationRequest,
     ContextOutcomeReport,
     ContextShadowSummary,
+    ShadowAction,
 )
 from optionmaster.costs.calculator import NseOptionCostCalculator, NseOptionCostSchedule
 from optionmaster.backtest.costs import BacktestOptionTradeRequest, evaluate_backtest_option_trade
 from optionmaster.dhan.client import DhanClientFactory
 from optionmaster.dhan.service import DhanMarketService
+from optionmaster.execution.mode import (
+    ExecutionMode,
+    ExecutionModeChangeRequest,
+    ExecutionModeState,
+    ExecutionModeStore,
+)
+from optionmaster.execution.real_orders import DhanRealOrderClient, RealOrderRejected
 from optionmaster.execution.super_order import SuperOrderIntent, SuperOrderPlanRequest, build_super_order_intent
 from optionmaster.instruments.models import QuantityRequest
 from optionmaster.instruments.scrip_master import NseScripMaster, ScripMasterError
@@ -33,21 +43,31 @@ from optionmaster.learning.service import (
     AutoPromotionResult,
     LearningService,
     PaperPromotionRejected,
+    PaperTrialRejected,
     ProfileEvaluation,
     StrategyProfileRegistry,
     UnknownStrategyProfile,
 )
+from optionmaster.learning.regime_router import RegimeStrategyRouter
+from optionmaster.learning.candidate_lab import CandidateLab, CandidateLabReport
 from optionmaster.market.features import build_features
-from optionmaster.market.models import AnalysisResult, MarketSnapshot, Signal
-from optionmaster.journal.store import PerformanceSummary, RecordedBacktestResult, TradeJournal
+from optionmaster.market.models import AnalysisResult, MarketSnapshot, OptionQuote, OptionSide, Regime, Signal
+from optionmaster.market.regime_learning import RegimePerformanceReport
+from optionmaster.journal.store import EntryAttempt, PerformanceSummary, RecordedBacktestResult, TradeJournal
 from optionmaster.paper.broker import PaperBroker, PaperTradeRejected
-from optionmaster.paper.models import CreatePaperTradeRequest, PaperTrade, PaperTradeDecision
+from optionmaster.paper.models import CreatePaperTradeRequest, PaperTrade, PaperTradeDecision, RealTradeDecision
+from optionmaster.ollama.models import OllamaReview, OllamaReviewSummary, OllamaStatus
+from optionmaster.ollama.reviewer import OllamaReviewError, OllamaSetupReviewer
 from optionmaster.risk.gate import apply_risk_gate
 from optionmaster.scalping.dhan_stream import DhanScalpingFeed
-from optionmaster.scalping.models import MarketTick, ScalpingDecision, ScalpingSession, ScalpingSessionRequest
+from optionmaster.scalping.models import (
+    BreakoutRetestPaperStartRequest, MarketTick, ScalpingDecision, ScalpingSession,
+    ScalpingSessionRequest, ScalpingStrategy,
+)
 from optionmaster.scalping.session import ScalpingSessionManager
-from optionmaster.strategy.regime import detect_regime
 from optionmaster.strategy.profiles import StrategyProfile
+from optionmaster.strategy.profiles import PAPER_ORB_VWAP_PROFILE
+from optionmaster.strategy.orb_vwap_live import PremiumMomentumTracker, evaluate_m1_bars
 from optionmaster.strategy.selector import select_signal
 
 app = FastAPI(title="OptionMaster", version=__version__)
@@ -70,11 +90,42 @@ telegram_notifier = TelegramNotifier(
 paper_broker = PaperBroker(
     cost_calculator=cost_calculator, journal=journal, notifier=telegram_notifier
 )
+ollama_reviewer = OllamaSetupReviewer(settings=get_settings(), journal=journal)
 stored_data_repository = StoredDataRepository(get_settings().stored_data_dir)
 spot_candle_repository = SpotCandleRepository(get_settings().spot_data_dir)
 nse_scrip_master = NseScripMaster(get_settings().scrip_master_dir)
 scalping_sessions = ScalpingSessionManager()
 scalping_streams: dict[str, DhanScalpingFeed] = {}
+execution_mode_store = ExecutionModeStore()
+regime_router = RegimeStrategyRouter(journal=journal, profiles=strategy_profiles)
+candidate_lab = CandidateLab(
+    repository=stored_data_repository,
+    spot_repository=spot_candle_repository,
+    calculator=cost_calculator,
+    lot_sizes=get_settings().lot_size_map,
+)
+orb_vwap_premium_tracker = PremiumMomentumTracker()
+
+
+class EntryRejected(ValueError):
+    def __init__(self, reason: str, analysis: AnalysisResult) -> None:
+        super().__init__(reason)
+        self.analysis = analysis
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedEntry:
+    request: CreatePaperTradeRequest
+    analysis: AnalysisResult
+    snapshot: MarketSnapshot
+    signal: Signal
+    quote: OptionQuote
+    quantity: int
+    lot_size: int
+    contract_security_id: int
+    strategy_id: str
+    minimum_signal_score: float
+    context_decision_id: str | None
 
 
 def _record_live_scalping_tick(session_id: str, tick: MarketTick) -> None:
@@ -115,14 +166,155 @@ def _record_shadow_context(
         return None
 
 
+def _evaluate_routed_market(
+    snapshot: MarketSnapshot,
+    *,
+    risk_gate: bool,
+    routing_execution_mode: ExecutionMode | None = None,
+) -> tuple[AnalysisResult, object]:
+    """Classify the market, retain the evidence, then select its paper strategy."""
+    features = build_features(snapshot)
+    selection = regime_router.select(
+        features=features,
+        execution_mode=routing_execution_mode or execution_mode_store.get().mode,
+    )
+    journal.record_regime_observation(selection.observation)
+    signal = select_signal(snapshot, features, selection.regime, selection.profile)
+    if risk_gate:
+        signal = apply_risk_gate(signal, minimum_signal_score=selection.profile.risk_gate_minimum_score)
+    return AnalysisResult(snapshot=snapshot, features=features, signal=signal), selection.profile
+
+
+def _prepare_option_entry(
+    request: CreatePaperTradeRequest,
+    *,
+    routing_execution_mode: ExecutionMode | None = None,
+) -> PreparedEntry:
+    """Fetch, analyse and validate a contract without placing an order."""
+    settings = get_settings()
+    if not settings.dhan_configured:
+        raise HTTPException(status_code=503, detail="Dhan credentials are not configured.")
+    service = DhanMarketService(DhanClientFactory(settings))
+    snapshot = service.live_snapshot(
+        symbol=request.symbol,
+        security_id=request.security_id,
+        segment=request.segment,
+        expiry=request.expiry,
+        instrument_type=request.instrument_type,
+        vix_security_id=settings.india_vix_security_id,
+        vix_segment=settings.india_vix_segment,
+        vix_instrument_type=settings.india_vix_instrument_type,
+    )
+    analysis, profile = _evaluate_routed_market(
+        snapshot, risk_gate=False, routing_execution_mode=routing_execution_mode
+    )
+    effective_request = request
+    if profile.paper_trial_only:
+        # The paper trade, stop, target, and risk check must all match the
+        # 10% / 15% configuration that was tested historically.
+        effective_request = request.model_copy(update={
+            "stop_loss_fraction": profile.paper_stop_loss_fraction,
+            "target_fraction": profile.paper_target_fraction,
+        })
+    signal = analysis.signal
+    context_decision = _record_shadow_context(
+        service=service, snapshot=snapshot, signal=signal,
+        security_id=request.security_id, segment=request.segment,
+        instrument_type=request.instrument_type,
+    )
+    if context_decision is not None and context_decision.action is ShadowAction.WOULD_SKIP:
+        raise EntryRejected(
+            "Index-chart context gate rejected the setup: " + "; ".join(context_decision.reasons),
+            analysis,
+        )
+    if signal.side is None or signal.strike is None:
+        raise EntryRejected(f"No trade signal: {signal.reason}", analysis)
+    # The local model receives this setup in the background. Its verdict never
+    # changes the deterministic signal, sizing, or order path.
+    ollama_reviewer.review_async(analysis=analysis, context=context_decision)
+    quote = next(
+        (item for item in snapshot.option_quotes if item.side is signal.side and item.strike == signal.strike),
+        None,
+    )
+    if quote is None:
+        raise EntryRejected(
+            f"Signalled contract {signal.strike} {signal.side} is not in the Dhan chain ({len(snapshot.option_quotes)} quotes).",
+            analysis,
+        )
+    if quote.security_id is None:
+        raise EntryRejected("The selected contract has no Dhan security ID for lot-size resolution.", analysis)
+    if signal.entry_price and signal.stop_loss_price and signal.target_price:
+        effective_request = effective_request.model_copy(update={
+            "stop_loss_fraction": max(0.001, (signal.entry_price - signal.stop_loss_price) / signal.entry_price),
+            "target_fraction": max(0.001, (signal.target_price - signal.entry_price) / signal.entry_price),
+        })
+    try:
+        # This auto-loads or refreshes the current NSE lot-size master before
+        # every orderable entry, rather than rejecting a valid setup on a new install.
+        nse_scrip_master.ensure_current()
+        quantity = resolve_quantity(
+            scrip_master=nse_scrip_master, security_id=quote.security_id,
+            lots=request.lots, requested_quantity=request.quantity,
+        )
+    except (ScripMasterError, QuantityResolutionError) as exc:
+        raise EntryRejected(str(exc), analysis) from exc
+
+    try:
+        paper_broker.entry_risk_check(request=effective_request, quote=quote, quantity=quantity.quantity)
+    except PaperTradeRejected as primary_rejection:
+        # The score-first selector naturally favours a higher-delta ATM quote.
+        # When one whole exchange lot breaches the fixed risk budget, retain
+        # direction and liquidity requirements but seek a lower-premium,
+        # same-side contract before rejecting the setup altogether.
+        alternatives = sorted(
+            (
+                candidate for candidate in snapshot.option_quotes
+                if candidate is not quote
+                and candidate.side is signal.side
+                and candidate.security_id is not None
+                and candidate.ask > 0 and candidate.bid > 0
+                and profile.minimum_option_delta <= abs(candidate.delta) <= profile.maximum_option_delta
+                and candidate.spread_fraction <= profile.maximum_option_spread_fraction
+            ),
+            key=lambda candidate: (candidate.ask, -abs(candidate.delta)),
+        )
+        selected = None
+        for candidate in alternatives:
+            try:
+                candidate_quantity = resolve_quantity(
+                    scrip_master=nse_scrip_master, security_id=candidate.security_id,
+                    lots=request.lots, requested_quantity=request.quantity,
+                )
+                paper_broker.entry_risk_check(
+                    request=effective_request, quote=candidate, quantity=candidate_quantity.quantity
+                )
+            except (PaperTradeRejected, QuantityResolutionError):
+                continue
+            selected = candidate, candidate_quantity
+            break
+        if selected is None:
+            raise EntryRejected(str(primary_rejection), analysis) from primary_rejection
+        quote, quantity = selected
+        signal.strike = quote.strike
+        signal.reason = f"{signal.reason} Selected a lower-premium risk-fit {quote.side} contract."
+    return PreparedEntry(
+        request=effective_request, analysis=analysis, snapshot=snapshot, signal=signal,
+        quote=quote, quantity=quantity.quantity, lot_size=quantity.lot_size,
+        contract_security_id=quote.security_id, strategy_id=profile.id,
+        minimum_signal_score=profile.minimum_signal_score,
+        context_decision_id=context_decision.id if context_decision is not None else None,
+    )
+
+
 @app.get("/health")
 def health() -> dict[str, object]:
     settings = get_settings()
+    mode = execution_mode_store.get()
     return {
         "status": "ok",
         "application": "OptionMaster",
         "version": __version__,
-        "execution_mode": settings.execution_mode,
+        "execution_mode": mode.mode.value,
         "dhan_configured": settings.dhan_configured,
         "underlyings": settings.underlying_symbols,
     }
@@ -131,22 +323,53 @@ def health() -> dict[str, object]:
 @app.post("/api/v1/analyze", response_model=Signal)
 def analyze(snapshot: MarketSnapshot) -> Signal:
     """Analyze a supplied snapshot without placing an order."""
-    profile = strategy_profiles.active()
-    features = build_features(snapshot)
-    regime = detect_regime(features, profile)
-    signal = select_signal(snapshot, features, regime, profile)
-    return apply_risk_gate(signal, minimum_signal_score=profile.risk_gate_minimum_score)
+    analysis, _ = _evaluate_routed_market(snapshot, risk_gate=True)
+    return analysis.signal
 
 
 @app.get("/api/v1/dhan/status")
 def dhan_status() -> dict[str, object]:
     settings = get_settings()
+    mode = execution_mode_store.get()
     return {
         "configured": settings.dhan_configured,
-        "execution_mode": settings.execution_mode,
-        "live_orders_enabled": settings.execution_mode == "LIVE",
+        "execution_mode": mode.mode.value,
+        "live_orders_enabled": mode.mode is ExecutionMode.REAL,
         "data_access": "available when credentials are configured",
     }
+
+
+@app.get("/api/v1/ollama/status", response_model=OllamaStatus)
+def ollama_status() -> OllamaStatus:
+    return ollama_reviewer.status()
+
+
+@app.get("/api/v1/ollama/reviews", response_model=list[OllamaReview])
+def ollama_reviews(limit: int = Query(default=20, ge=1, le=200)) -> list[OllamaReview]:
+    return journal.list_ollama_reviews(limit)
+
+
+@app.get("/api/v1/reports/ollama", response_model=OllamaReviewSummary)
+def ollama_report() -> OllamaReviewSummary:
+    return journal.ollama_review_summary()
+
+
+@app.get("/api/v1/execution/mode", response_model=ExecutionModeState)
+def execution_mode_status() -> ExecutionModeState:
+    return execution_mode_store.get()
+
+
+@app.post("/api/v1/execution/mode", response_model=ExecutionModeState)
+def set_execution_mode(request: ExecutionModeChangeRequest) -> ExecutionModeState:
+    if request.mode is ExecutionMode.REAL and strategy_profiles.active().paper_trial_only:
+        raise HTTPException(
+            status_code=409,
+            detail="End the active paper-only strategy trial before arming Real Trade.",
+        )
+    try:
+        return execution_mode_store.set(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/instruments/nse/status")
@@ -277,6 +500,28 @@ def backtest_performance(strategy_id: str | None = Query(default=None, min_lengt
     return journal.performance("backtest", strategy_id=strategy_id)
 
 
+@app.get("/api/v1/reports/regime-performance", response_model=RegimePerformanceReport)
+def regime_performance_report() -> RegimePerformanceReport:
+    """Show current regime, route choice, and closed-paper evidence by strategy and regime."""
+    return regime_router.report()
+
+
+@app.post("/api/v1/research/candidates/run", response_model=CandidateLabReport)
+def run_candidate_research() -> CandidateLabReport:
+    """Run fixed candidates with a chronological holdout; never changes execution."""
+    if execution_mode_store.get().mode is not ExecutionMode.PAPER:
+        raise HTTPException(status_code=409, detail="Candidate research is locked outside PAPER mode.")
+    if not stored_data_repository.available or not spot_candle_repository.available:
+        raise HTTPException(status_code=503, detail="Stored option and M1 spot data are required for candidate research.")
+    try:
+        report, runs = candidate_lab.run()
+        for run in runs:
+            journal.record_backtest_run(run)
+        return report
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.get("/api/v1/reports/context-shadow", response_model=ContextShadowSummary)
 def context_shadow_report() -> ContextShadowSummary:
     """Summarize the observation-only filters across all saved signal evaluations."""
@@ -329,6 +574,29 @@ def activate_learning_profile(profile_id: str) -> StrategyProfile:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.post("/api/v1/learning/profiles/{profile_id}/start-paper-trial", response_model=StrategyProfile)
+def start_learning_paper_trial(profile_id: str) -> StrategyProfile:
+    """Start a designated trial only while the application is in Paper mode."""
+    if execution_mode_store.get().mode is not ExecutionMode.PAPER:
+        raise HTTPException(status_code=409, detail="Switch to Paper Trade before starting a paper trial.")
+    try:
+        return strategy_profiles.start_paper_trial(profile_id)
+    except UnknownStrategyProfile as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PaperTrialRejected as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/learning/end-paper-trial", response_model=StrategyProfile)
+def end_learning_paper_trial() -> StrategyProfile:
+    """Return to the baseline profile after an explicit paper-only trial."""
+    if execution_mode_store.get().mode is not ExecutionMode.PAPER:
+        raise HTTPException(status_code=409, detail="Switch to Paper Trade before ending a paper trial.")
+    if not strategy_profiles.active().paper_trial_only:
+        raise HTTPException(status_code=409, detail="There is no active paper-only strategy trial to end.")
+    return strategy_profiles.activate("baseline-v1")
+
+
 @app.post("/api/v1/learning/review-and-promote", response_model=AutoPromotionResult)
 def review_and_promote_learning_profile() -> AutoPromotionResult:
     """Select the strongest qualifying candidate using closed forward paper results only."""
@@ -355,6 +623,71 @@ def create_scalping_session(request: ScalpingSessionRequest) -> ScalpingSession:
         )
     configuration = request.model_copy(update={"lot_size": resolved.lot_size})
     return scalping_sessions.create(configuration)
+
+
+@app.post("/api/v1/scalping/breakout-retest/start-paper", response_model=ScalpingSession)
+def start_breakout_retest_paper_monitor(request: BreakoutRetestPaperStartRequest) -> ScalpingSession:
+    """Subscribe to one current ATM option for a 15-second, paper-only monitor."""
+    if execution_mode_store.get().mode is not ExecutionMode.PAPER:
+        raise HTTPException(status_code=409, detail="Breakout-retest monitoring is available only in Paper Trade mode.")
+    settings = get_settings()
+    if not settings.dhan_configured:
+        raise HTTPException(status_code=503, detail="Dhan credentials are not configured.")
+    service = DhanMarketService(DhanClientFactory(settings))
+    try:
+        expiry = request.expiry.isoformat() if request.expiry else None
+        if expiry is None:
+            from datetime import date
+            candidates = sorted(item for item in service.expiries(settings.auto_security_id, settings.auto_segment) if item > date.today().isoformat())
+            expiry = candidates[0] if candidates else None
+        if expiry is None:
+            raise ValueError("No non-expiry-day contract is available for the paper monitor.")
+        snapshot = service.option_chain_snapshot(
+            symbol=settings.auto_symbol, security_id=settings.auto_security_id,
+            segment=settings.auto_segment, expiry=expiry,
+        )
+        candidates = [
+            quote for quote in snapshot.option_quotes
+            if quote.side is request.option_side and quote.security_id is not None and quote.bid > 0 and quote.ask > 0
+        ]
+        if not candidates:
+            raise ValueError(f"Dhan returned no usable {request.option_side} contract for the selected expiry.")
+        candidates = [
+            quote for quote in candidates
+            if 0.25 <= abs(quote.delta) <= 0.65
+            and quote.spread_fraction <= 0.03
+            and quote.oi > 0 and quote.volume > 0
+        ]
+        if not candidates:
+            raise ValueError("Dhan returned no liquid Greek/OI-qualified contract for the selected option side.")
+        option = max(
+            candidates,
+            key=lambda quote: (
+                min(abs(quote.delta) / 0.55, 1.0),
+                min(abs(quote.oi_change) / max(quote.oi, 1.0) * 10.0, 1.0),
+                min(quote.volume / max(quote.oi, 1.0) * 100.0, 1.0),
+                -abs(quote.strike - snapshot.underlying),
+            ),
+        )
+        nse_scrip_master.ensure_current()
+        resolved = resolve_quantity(scrip_master=nse_scrip_master, security_id=option.security_id, lots=1)
+        configuration = ScalpingSessionRequest(
+            symbol=settings.auto_symbol, spot_security_id=settings.auto_security_id,
+            option_security_id=option.security_id, option_side=request.option_side,
+            expiry=expiry, spot_segment=settings.auto_segment, option_segment="NSE_FNO",
+            lot_size=resolved.lot_size, strategy=ScalpingStrategy.BREAKOUT_RETEST_3_BAR,
+        )
+        session = scalping_sessions.create(configuration)
+        feed = DhanScalpingFeed(
+            settings=settings, configuration=configuration,
+            on_tick=lambda tick: _record_live_scalping_tick(session.id, tick),
+            on_error=lambda error: scalping_sessions.set_running(session.id, False, error),
+        )
+        feed.start()
+        scalping_streams[session.id] = feed
+        return scalping_sessions.set_running(session.id, True)
+    except (RuntimeError, ValueError, QuantityResolutionError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/scalping/sessions/{session_id}", response_model=ScalpingSession)
@@ -487,7 +820,6 @@ def dhan_analyze(
     if not settings.dhan_configured:
         raise HTTPException(status_code=503, detail="Dhan credentials are not configured.")
     try:
-        profile = strategy_profiles.active()
         service = DhanMarketService(DhanClientFactory(settings))
         snapshot = service.live_snapshot(
             symbol=symbol,
@@ -499,12 +831,8 @@ def dhan_analyze(
             vix_segment=settings.india_vix_segment,
             vix_instrument_type=settings.india_vix_instrument_type,
         )
-        features = build_features(snapshot)
-        regime = detect_regime(features, profile)
-        signal = apply_risk_gate(
-            select_signal(snapshot, features, regime, profile),
-            minimum_signal_score=profile.risk_gate_minimum_score,
-        )
+        analysis, _ = _evaluate_routed_market(snapshot, risk_gate=True)
+        signal = analysis.signal
         _record_shadow_context(
             service=service,
             snapshot=snapshot,
@@ -513,7 +841,7 @@ def dhan_analyze(
             segment=segment,
             instrument_type=instrument_type,
         )
-        return AnalysisResult(snapshot=snapshot, features=features, signal=signal)
+        return analysis
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Dhan analysis request failed: {exc}") from exc
 
@@ -531,7 +859,6 @@ def dhan_context(
     if not settings.dhan_configured:
         raise HTTPException(status_code=503, detail="Dhan credentials are not configured.")
     try:
-        profile = strategy_profiles.active()
         service = DhanMarketService(DhanClientFactory(settings))
         snapshot = service.live_snapshot(
             symbol=symbol,
@@ -543,12 +870,8 @@ def dhan_context(
             vix_segment=settings.india_vix_segment,
             vix_instrument_type=settings.india_vix_instrument_type,
         )
-        features = build_features(snapshot)
-        regime = detect_regime(features, profile)
-        signal = apply_risk_gate(
-            select_signal(snapshot, features, regime, profile),
-            minimum_signal_score=profile.risk_gate_minimum_score,
-        )
+        analysis, _ = _evaluate_routed_market(snapshot, risk_gate=True)
+        signal = analysis.signal
         decision = _record_shadow_context(
             service=service,
             snapshot=snapshot,
@@ -573,71 +896,158 @@ def paper_trades() -> list[PaperTrade]:
 @app.post("/api/v1/dhan/paper-trades", response_model=PaperTradeDecision)
 def create_dhan_paper_trade(request: CreatePaperTradeRequest) -> PaperTradeDecision:
     """Create a simulated option-buying trade only when the full gate passes."""
-    settings = get_settings()
-    if not settings.dhan_configured:
-        raise HTTPException(status_code=503, detail="Dhan credentials are not configured.")
+    prepared: PreparedEntry | None = None
     try:
-        profile = strategy_profiles.active()
-        service = DhanMarketService(DhanClientFactory(settings))
-        snapshot = service.live_snapshot(
-            symbol=request.symbol,
-            security_id=request.security_id,
-            segment=request.segment,
-            expiry=request.expiry,
-            instrument_type=request.instrument_type,
-            vix_security_id=settings.india_vix_security_id,
-            vix_segment=settings.india_vix_segment,
-            vix_instrument_type=settings.india_vix_instrument_type,
+        prepared = _prepare_option_entry(request, routing_execution_mode=ExecutionMode.PAPER)
+        trade = paper_broker.open_from_signal(
+            request=request, signal=prepared.signal, snapshot=prepared.snapshot,
+            quantity=prepared.quantity, lot_size=prepared.lot_size,
+            contract_security_id=prepared.contract_security_id,
+            strategy_id=prepared.strategy_id,
+            minimum_signal_score=prepared.minimum_signal_score,
+            context_decision_id=prepared.context_decision_id,
         )
-        features = build_features(snapshot)
-        regime = detect_regime(features, profile)
-        signal = select_signal(snapshot, features, regime, profile)
-        analysis = AnalysisResult(snapshot=snapshot, features=features, signal=signal)
-        context_decision = _record_shadow_context(
-            service=service,
-            snapshot=snapshot,
-            signal=signal,
-            security_id=request.security_id,
-            segment=request.segment,
-            instrument_type=request.instrument_type,
-        )
-        selected_quote = next(
-            (
-                quote
-                for quote in snapshot.option_quotes
-                if quote.side is signal.side and quote.strike == signal.strike
-            ),
-            None,
-        )
-        if selected_quote is None or selected_quote.security_id is None:
-            return PaperTradeDecision(
-                accepted=False,
-                reason="The selected contract has no Dhan security ID for lot-size resolution.",
-                analysis=analysis,
-            )
-        try:
-            quantity = resolve_quantity(
-                scrip_master=nse_scrip_master,
-                security_id=selected_quote.security_id,
-                lots=request.lots,
-                requested_quantity=request.quantity,
-            )
-            trade = paper_broker.open_from_signal(
-                request=request,
-                signal=signal,
-                snapshot=snapshot,
-                quantity=quantity.quantity,
-                lot_size=quantity.lot_size,
-                contract_security_id=selected_quote.security_id,
-                strategy_id=profile.id,
-                minimum_signal_score=profile.minimum_signal_score,
-                context_decision_id=context_decision.id if context_decision is not None else None,
-            )
-        except (PaperTradeRejected, QuantityResolutionError) as exc:
-            return PaperTradeDecision(accepted=False, reason=str(exc), analysis=analysis)
-        return PaperTradeDecision(accepted=True, reason="Paper trade opened.", analysis=analysis, trade=trade)
+        return PaperTradeDecision(accepted=True, reason="Paper trade opened.", analysis=prepared.analysis, trade=trade)
+    except EntryRejected as exc:
+        return PaperTradeDecision(accepted=False, reason=str(exc), analysis=exc.analysis)
+    except PaperTradeRejected as exc:
+        # The analysis was completed but the paper risk gate blocked the fill.
+        assert prepared is not None
+        return PaperTradeDecision(accepted=False, reason=str(exc), analysis=prepared.analysis)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Dhan paper-trade request failed: {exc}") from exc
+
+
+def create_orb_vwap_paper_trade(request: CreatePaperTradeRequest) -> PaperTradeDecision:
+    """Evaluate the fixed ORB/VWAP strategy and, only in its paper trial, simulate it."""
+    if execution_mode_store.get().mode is not ExecutionMode.PAPER:
+        raise RuntimeError("ORB/VWAP forward trial is paper-only.")
+    if strategy_profiles.active().id != PAPER_ORB_VWAP_PROFILE.id:
+        raise RuntimeError("ORB/VWAP forward trial is not the active paper profile.")
+    settings = get_settings()
+    service = DhanMarketService(DhanClientFactory(settings))
+    snapshot = service.live_snapshot(
+        symbol=request.symbol, security_id=request.security_id, segment=request.segment,
+        expiry=request.expiry, instrument_type=request.instrument_type,
+        vix_security_id=settings.india_vix_security_id, vix_segment=settings.india_vix_segment,
+        vix_instrument_type=settings.india_vix_instrument_type,
+    )
+    bars = service.intraday_bars(
+        security_id=request.security_id, segment=request.segment,
+        instrument_type=request.instrument_type, interval=1, lookback_days=1, maximum_bars=450,
+    )
+    setup = evaluate_m1_bars(bars)
+    features = build_features(snapshot)
+    if setup is None:
+        orb_vwap_premium_tracker.observe(snapshot)
+        signal = Signal(
+            symbol=request.symbol.upper(), timestamp=snapshot.timestamp, regime=Regime.NO_TRADE,
+            strategy_id=PAPER_ORB_VWAP_PROFILE.id, reason="ORB/VWAP: no completed qualifying setup.",
+        )
+        return PaperTradeDecision(
+            accepted=False, reason=signal.reason,
+            analysis=AnalysisResult(snapshot=snapshot, features=features, signal=signal),
+        )
+    quote = min(
+        (item for item in snapshot.option_quotes if item.side is setup.side),
+        key=lambda item: abs(item.strike - snapshot.underlying), default=None,
+    )
+    regime = Regime.BULLISH_TREND if setup.side is OptionSide.CE else Regime.BEARISH_TREND
+    signal = Signal(
+        symbol=request.symbol.upper(), timestamp=snapshot.timestamp, regime=regime,
+        strategy_id=PAPER_ORB_VWAP_PROFILE.id, side=setup.side,
+        strike=quote.strike if quote is not None else None, score=1.0,
+        reason=(f"ORB/VWAP {setup.side.value}: opening range, VWAP, volume and ADX "
+                f"{setup.adx:.1f} confirmed on the {setup.signal_bar_closed_at:%H:%M} IST bar."),
+    )
+    analysis = AnalysisResult(snapshot=snapshot, features=features, signal=signal)
+    if quote is None or quote.ask <= 0 or quote.bid <= 0 or quote.security_id is None:
+        orb_vwap_premium_tracker.observe(snapshot)
+        return PaperTradeDecision(accepted=False, reason="ORB/VWAP: no usable ATM option quote.", analysis=analysis)
+    if quote.ltp < 20 or quote.ask > 600 or quote.spread_fraction > 0.01:
+        orb_vwap_premium_tracker.observe(snapshot)
+        return PaperTradeDecision(accepted=False, reason="ORB/VWAP: option premium or spread filter blocked entry.", analysis=analysis)
+    premium_change = orb_vwap_premium_tracker.observe_and_change(
+        snapshot, strike=quote.strike, side=setup.side,
+    )
+    if premium_change is None or premium_change < 0.15:
+        return PaperTradeDecision(
+            accepted=False, reason="ORB/VWAP: awaiting same-direction option premium momentum.", analysis=analysis,
+        )
+    try:
+        nse_scrip_master.ensure_current()
+        quantity = resolve_quantity(
+            scrip_master=nse_scrip_master, security_id=quote.security_id,
+            lots=request.lots, requested_quantity=request.quantity,
+        )
+        context = _record_shadow_context(
+            service=service, snapshot=snapshot, signal=signal, security_id=request.security_id,
+            segment=request.segment, instrument_type=request.instrument_type,
+        )
+        if context is not None and context.action is ShadowAction.WOULD_SKIP:
+            return PaperTradeDecision(
+                accepted=False,
+                reason="ORB/VWAP: index-chart context gate rejected the setup: " + "; ".join(context.reasons),
+                analysis=analysis,
+            )
+        effective_request = request.model_copy(update={
+            "stop_loss_fraction": 0.05, "target_fraction": 0.10,
+        })
+        trade = paper_broker.open_from_signal(
+            request=effective_request, signal=signal, snapshot=snapshot,
+            quantity=quantity.quantity, lot_size=quantity.lot_size,
+            contract_security_id=quote.security_id, strategy_id=PAPER_ORB_VWAP_PROFILE.id,
+            minimum_signal_score=1.0, context_decision_id=context.id if context else None,
+        )
+        return PaperTradeDecision(
+            accepted=True, reason="ORB/VWAP paper trade opened.", analysis=analysis, trade=trade,
+        )
+    except (ScripMasterError, QuantityResolutionError, PaperTradeRejected) as exc:
+        return PaperTradeDecision(accepted=False, reason=f"ORB/VWAP: {exc}", analysis=analysis)
+
+
+def create_dhan_real_trade(request: CreatePaperTradeRequest) -> RealTradeDecision:
+    """Submit a protected Dhan Super Order only when real mode is explicitly armed."""
+    if execution_mode_store.get().mode is not ExecutionMode.REAL:
+        raise HTTPException(status_code=409, detail="Real mode is not armed. Select Real Trade and confirm first.")
+    if strategy_profiles.active().paper_trial_only:
+        raise HTTPException(
+            status_code=409,
+            detail="A paper-only strategy trial is active. Select a non-trial profile before arming real orders.",
+        )
+    prepared: PreparedEntry | None = None
+    try:
+        prepared = _prepare_option_entry(request, routing_execution_mode=ExecutionMode.REAL)
+        receipt = DhanRealOrderClient(get_settings()).place_option_buy(
+            security_id=prepared.contract_security_id, quantity=prepared.quantity,
+            quote=prepared.quote, request=request,
+        )
+        return RealTradeDecision(
+            accepted=True, reason="Protected Dhan Super Order submitted.", analysis=prepared.analysis,
+            order_id=receipt.order_id, order_status=receipt.order_status,
+            correlation_id=receipt.correlation_id, order_type=receipt.order_type,
+        )
+    except EntryRejected as exc:
+        return RealTradeDecision(accepted=False, reason=str(exc), analysis=exc.analysis)
+    except RealOrderRejected as exc:
+        # A gate-approved setup still must disclose a broker refusal clearly.
+        assert prepared is not None
+        return RealTradeDecision(accepted=False, reason=str(exc), analysis=prepared.analysis)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Dhan real-trade request failed: {exc}") from exc
+
+
+def create_automated_trade(request: CreatePaperTradeRequest) -> PaperTradeDecision | RealTradeDecision:
+    """Route the autonomous worker through the mode selected in the dashboard."""
+    # A later dashboard mode change must not turn a forward-paper trial into
+    # a Dhan order.  This route remains simulated until the trial is ended.
+    if strategy_profiles.active().paper_trial_only:
+        return create_dhan_paper_trade(request)
+    if execution_mode_store.get().mode is ExecutionMode.REAL:
+        return create_dhan_real_trade(request)
+    return create_dhan_paper_trade(request)
 
 
 @app.post("/api/v1/dhan/paper-trades/{trade_id}/mark", response_model=PaperTrade)
@@ -672,6 +1082,13 @@ def mark_dhan_paper_trade(trade_id: str) -> PaperTrade:
 
 @app.on_event("startup")
 def _start_auto_trader() -> None:
+    try:
+        nse_scrip_master.ensure_current()
+        print("[OptionMaster] NSE lot-size master ready.")
+    except ScripMasterError as exc:
+        # The worker will retry before every orderable entry and expose the
+        # final reason in its durable audit; startup itself must stay available.
+        print(f"[OptionMaster] NSE lot-size master refresh deferred: {exc}")
     from optionmaster.workers.auto_trader import start_auto_trader
     start_auto_trader(paper_broker)
 
@@ -680,6 +1097,12 @@ def _start_auto_trader() -> None:
 def auto_trader_status() -> dict[str, object]:
     from optionmaster.workers import auto_trader
     return auto_trader.status()
+
+
+@app.get("/api/v1/auto/attempts", response_model=list[EntryAttempt])
+def auto_trader_attempts(limit: int = Query(default=20, ge=1, le=200)) -> list[EntryAttempt]:
+    """Latest durable autonomous-entry decisions, including every decline."""
+    return journal.list_entry_attempts(limit)
 
 
 @app.post("/api/v1/auto/toggle")
