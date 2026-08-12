@@ -900,7 +900,7 @@ def create_dhan_paper_trade(request: CreatePaperTradeRequest) -> PaperTradeDecis
     try:
         prepared = _prepare_option_entry(request, routing_execution_mode=ExecutionMode.PAPER)
         trade = paper_broker.open_from_signal(
-            request=request, signal=prepared.signal, snapshot=prepared.snapshot,
+            request=prepared.request, signal=prepared.signal, snapshot=prepared.snapshot,
             quantity=prepared.quantity, lot_size=prepared.lot_size,
             contract_security_id=prepared.contract_security_id,
             strategy_id=prepared.strategy_id,

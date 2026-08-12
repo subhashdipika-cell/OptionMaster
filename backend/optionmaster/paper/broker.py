@@ -1,9 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from threading import RLock
 
 from optionmaster.costs.calculator import NseOptionCostCalculator
 from optionmaster.journal.store import TradeJournal
-from optionmaster.market.models import MarketSnapshot, Signal
+from optionmaster.market.models import MarketSnapshot, Regime, Signal
 from optionmaster.paper.models import CreatePaperTradeRequest, PaperTrade, PaperTradeStatus
 
 
@@ -29,6 +29,37 @@ class PaperBroker:
         self._costs = cost_calculator or NseOptionCostCalculator()
         self._journal = journal
         self._notifier = notifier
+        self._restore_persisted_open_trades()
+
+    def _restore_persisted_open_trades(self) -> None:
+        """Restore valid paper positions and quarantine expired, unpriced ones.
+
+        Paper entries are durable, while the broker's quote cache is not. A
+        restart during a valid contract's lifetime must therefore restore the
+        position for mark-to-market and square-off. An already expired contract
+        cannot be given a synthetic exit price, so it is marked UNRECONCILED
+        and excluded from all evidence rather than silently remaining OPEN.
+        """
+        if self._journal is None:
+            return
+        today = datetime.now(IST).date()
+        for trade in self._journal.list_paper_trades():
+            if trade.status is not PaperTradeStatus.OPEN:
+                continue
+            try:
+                expired = date.fromisoformat(trade.expiry) < today
+            except ValueError:
+                expired = True
+            if expired:
+                trade.status = PaperTradeStatus.UNRECONCILED
+                trade.rationale = (
+                    f"{trade.rationale} [Unreconciled: application restarted after "
+                    "contract expiry; no exit price was fabricated.]"
+                )
+                trade.unrealized_pnl = 0.0
+                self._journal.record_paper_trade(trade)
+                continue
+            self._trades[trade.id] = trade
 
     def list_trades(self) -> list[PaperTrade]:
         with self._lock:
@@ -51,7 +82,12 @@ class PaperBroker:
         minimum_signal_score: float = 0.65,
         context_decision_id: str | None = None,
     ) -> PaperTrade:
-        if not signal.side or signal.strike is None or signal.score < minimum_signal_score:
+        if (
+            signal.regime is Regime.NO_TRADE
+            or not signal.side
+            or signal.strike is None
+            or signal.score < minimum_signal_score
+        ):
             raise PaperTradeRejected("Signal is not strong enough for a paper entry.")
         if any(trade.status is PaperTradeStatus.OPEN for trade in self.list_trades()):
             raise PaperTradeRejected("Only one paper position may be open at a time.")

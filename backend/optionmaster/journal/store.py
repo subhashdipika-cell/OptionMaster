@@ -16,7 +16,7 @@ from optionmaster.context.models import (
     ShadowAction,
 )
 from optionmaster.costs.calculator import NetTradeResult
-from optionmaster.paper.models import PaperTrade
+from optionmaster.paper.models import COMPLETED_PAPER_TRADE_STATUSES, PaperTrade
 from optionmaster.ollama.models import OllamaReview, OllamaReviewSummary, OllamaVerdict
 from optionmaster.market.models import Regime
 from optionmaster.market.regime_learning import RegimeObservation, RegimeStrategyPerformance
@@ -67,6 +67,38 @@ class TradeJournal:
         self._lock = RLock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+        self._backfill_clear_paper_trade_regimes()
+
+    @staticmethod
+    def _completed_status_values() -> tuple[str, ...]:
+        return tuple(status.value for status in COMPLETED_PAPER_TRADE_STATUSES)
+
+    def _backfill_clear_paper_trade_regimes(self) -> None:
+        """Repair only historical rows whose stored rationale names the regime.
+
+        Earlier entries retained their directional rationale but defaulted their
+        payload regime to NO_TRADE. The text is sufficient evidence for a narrow,
+        auditable backfill; ambiguous records remain untouched.
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT payload FROM paper_trades WHERE regime IS NULL OR regime = ?",
+                (Regime.NO_TRADE.value,),
+            ).fetchall()
+        for (payload,) in rows:
+            trade = PaperTrade.model_validate_json(str(payload))
+            inferred = next(
+                (
+                    regime for regime in (Regime.BULLISH_TREND, Regime.BEARISH_TREND)
+                    if trade.rationale.startswith(f"{regime.value}:")
+                ),
+                None,
+            )
+            if inferred is None:
+                continue
+            trade.regime = inferred
+            trade.rationale = f"{trade.rationale} [Regime backfilled from original entry rationale.]"
+            self.record_paper_trade(trade)
 
     def record_paper_trade(self, trade: PaperTrade) -> None:
         payload = trade.model_dump_json()
@@ -138,9 +170,9 @@ class TradeJournal:
                 """
                 SELECT regime, strategy_id, gross_pnl, net_pnl, charges
                 FROM paper_trades
-                WHERE status != ? AND regime IS NOT NULL
+                WHERE status IN (?, ?, ?) AND regime IS NOT NULL
                 """,
-                ("OPEN",),
+                self._completed_status_values(),
             ).fetchall()
         groups: dict[tuple[str, str], list[tuple[float, float, float]]] = {}
         for regime, strategy_id, gross_pnl, net_pnl, charges in rows:
@@ -312,9 +344,9 @@ class TradeJournal:
                 SELECT paper_trades.net_pnl
                 FROM paper_trades
                 JOIN ollama_reviews ON ollama_reviews.context_decision_id = paper_trades.context_decision_id
-                WHERE paper_trades.status != ?
+                WHERE paper_trades.status IN (?, ?, ?)
                 """,
-                ("OPEN",),
+                self._completed_status_values(),
             ).fetchall()
         verdicts = [str(row[0]) for row in rows]
         return OllamaReviewSummary(
@@ -371,9 +403,9 @@ class TradeJournal:
                 SELECT paper_trades.net_pnl, context_decisions.payload
                 FROM paper_trades
                 JOIN context_decisions ON paper_trades.context_decision_id = context_decisions.id
-                WHERE paper_trades.status != ?
+                WHERE paper_trades.status IN (?, ?, ?)
                 """,
-                ("OPEN",),
+                self._completed_status_values(),
             ).fetchall()
         groups: dict[str, dict[str, list[float]]] = {
             "freshness": {"Fresh": [], "Extended / stale": []},
@@ -422,8 +454,8 @@ class TradeJournal:
         filters: list[str] = []
         values: list[str] = []
         if scope == "paper":
-            filters.append("status != ?")
-            values.append("OPEN")
+            filters.append("status IN (?, ?, ?)")
+            values.extend(self._completed_status_values())
         if strategy_id is not None:
             filters.append("strategy_id = ?")
             values.append(strategy_id)

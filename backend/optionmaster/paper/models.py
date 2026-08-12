@@ -13,6 +13,17 @@ class PaperTradeStatus(StrEnum):
     TARGET_HIT = "TARGET_HIT"
     STOP_LOSS_HIT = "STOP_LOSS_HIT"
     CLOSED = "CLOSED"
+    # A restarted application cannot truthfully invent an exit fill for an
+    # option whose expiry has already passed. Keep that record visible, but
+    # exclude it from performance evidence and new-position management.
+    UNRECONCILED = "UNRECONCILED"
+
+
+COMPLETED_PAPER_TRADE_STATUSES: tuple[PaperTradeStatus, ...] = (
+    PaperTradeStatus.TARGET_HIT,
+    PaperTradeStatus.STOP_LOSS_HIT,
+    PaperTradeStatus.CLOSED,
+)
 
 
 class CreatePaperTradeRequest(BaseModel):
