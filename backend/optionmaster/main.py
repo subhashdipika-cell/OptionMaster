@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -1096,7 +1097,22 @@ def orb_vwap_diagnostics() -> dict[str, object]:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"ORB/VWAP diagnostics failed: {exc}") from exc
+        # This is an explanatory dashboard panel, never an execution dependency.
+        # A transient Dhan rate-limit/data failure must leave the rest of the
+        # dashboard usable and make its own unavailable state explicit.
+        return {
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "phase": "DATA_UNAVAILABLE",
+            "ready": False,
+            "candidate_side": None,
+            "gates": [{
+                "key": "market_data", "label": "Live Dhan market data", "passed": None,
+                "detail": f"Temporarily unavailable: {exc}",
+            }],
+            "summary": "The live ORB/VWAP diagnostic will retry on the next dashboard refresh.",
+            "option": {"status": "Waiting for Dhan market data."},
+            "expiry": None,
+        }
 
 
 def create_dhan_real_trade(request: CreatePaperTradeRequest) -> RealTradeDecision:

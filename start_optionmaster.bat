@@ -63,8 +63,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem Hand the URL to Windows Shell explicitly so a desktop shortcut opens the default browser.
-start "" explorer.exe "http://127.0.0.1:%FRONTEND_PORT%/?build=20260901a"
+set "DASHBOARD_URL=http://127.0.0.1:%FRONTEND_PORT%/?build=20260901a"
+if exist "C:\Program Files\Google\Chrome\Application\chrome.exe" (
+    rem This PC has Chrome installed but no default HTTP URL association configured.
+    start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --new-window "%DASHBOARD_URL%"
+) else (
+    start "" explorer.exe "%DASHBOARD_URL%"
+)
 
 echo.
 echo OptionMaster is available at http://127.0.0.1:%FRONTEND_PORT%/?build=20260901a
