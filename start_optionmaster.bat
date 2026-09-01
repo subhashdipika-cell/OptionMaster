@@ -49,7 +49,7 @@ if errorlevel 1 (
         start "OptionMaster Dashboard" "%PYTHON_EXE%" -m http.server %FRONTEND_PORT% --bind 127.0.0.1 --directory frontend
     )
 ) else (
-    powershell.exe -NoLogo -NoProfile -Command "$c=Get-NetTCPConnection -LocalPort %FRONTEND_PORT% -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; $cmd=(Get-CimInstance Win32_Process -Filter \"ProcessId=$($c.OwningProcess)\" -ErrorAction SilentlyContinue).CommandLine; if($cmd -match 'OptionMaster.+http[.]server'){exit 0}; exit 1" >nul 2>&1
+    powershell.exe -NoLogo -NoProfile -Command "try { $r=Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:%FRONTEND_PORT%/' -TimeoutSec 2; if ($r.StatusCode -eq 200 -and $r.Content -match 'OptionMaster') { exit 0 } } catch {}; exit 1" >nul 2>&1
     if errorlevel 1 (
         echo [ERROR] Port %FRONTEND_PORT% is occupied by a service that is not OptionMaster.
         exit /b 1
@@ -66,7 +66,8 @@ if errorlevel 1 (
 set "DASHBOARD_URL=http://127.0.0.1:%FRONTEND_PORT%/?build=20260901a"
 if exist "C:\Program Files\Google\Chrome\Application\chrome.exe" (
     rem This PC has Chrome installed but no default HTTP URL association configured.
-    start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --new-window "%DASHBOARD_URL%"
+    rem A dedicated local Chrome profile prevents the dashboard from merging into an existing trading tab.
+    powershell.exe -NoLogo -NoProfile -Command "Start-Process -FilePath 'C:\Program Files\Google\Chrome\Application\chrome.exe' -ArgumentList '--user-data-dir=%CD%\work\optionmaster-chrome','--app=%DASHBOARD_URL%','--start-maximized'"
 ) else (
     start "" explorer.exe "%DASHBOARD_URL%"
 )

@@ -10,3 +10,4 @@ logs/
 *.db
 
 backend/*.egg-info/
+work/optionmaster-chrome/
