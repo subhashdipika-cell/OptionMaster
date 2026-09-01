@@ -63,7 +63,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
-start "" "http://127.0.0.1:%FRONTEND_PORT%/?build=20260901a"
+rem Hand the URL to Windows Shell explicitly so a desktop shortcut opens the default browser.
+start "" explorer.exe "http://127.0.0.1:%FRONTEND_PORT%/?build=20260901a"
 
 echo.
 echo OptionMaster is available at http://127.0.0.1:%FRONTEND_PORT%/?build=20260901a
