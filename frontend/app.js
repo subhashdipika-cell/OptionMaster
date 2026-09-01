@@ -44,6 +44,12 @@ const elements = {
   autoTraderStatus: document.querySelector("#auto-trader-status"),
   autoTraderReason: document.querySelector("#auto-trader-reason"),
   autoTraderAttempt: document.querySelector("#auto-trader-attempt"),
+  orbDiagnosticPhase: document.querySelector("#orb-diagnostic-phase"),
+  orbDiagnosticSummary: document.querySelector("#orb-diagnostic-summary"),
+  orbDiagnosticRange: document.querySelector("#orb-diagnostic-range"),
+  orbDiagnosticPrice: document.querySelector("#orb-diagnostic-price"),
+  orbDiagnosticOption: document.querySelector("#orb-diagnostic-option"),
+  orbDiagnosticGates: document.querySelector("#orb-diagnostic-gates"),
   retestMonitorStatus: document.querySelector("#retest-monitor-status"),
   retestMonitorDetail: document.querySelector("#retest-monitor-detail"),
   retestCeButton: document.querySelector("#retest-ce-button"),
@@ -220,6 +226,35 @@ function renderExecution(mode, auto, attempts) {
   elements.autoTraderAttempt.textContent = last
     ? `${last.outcome}: ${last.reason}`
     : "No durable attempts yet.";
+}
+
+function renderOrbDiagnostics(diagnostic) {
+  const active = diagnostic?.phase === "READY";
+  elements.orbDiagnosticPhase.textContent = diagnostic?.phase ? String(diagnostic.phase).replaceAll("_", " ") : "Unavailable";
+  elements.orbDiagnosticPhase.classList.toggle("ready", active);
+  elements.orbDiagnosticSummary.textContent = diagnostic?.summary || "The live ORB/VWAP diagnostic is unavailable.";
+  const high = diagnostic?.opening_high;
+  const low = diagnostic?.opening_low;
+  elements.orbDiagnosticRange.textContent = high == null || low == null ? "—" : `${Number(low).toFixed(2)} – ${Number(high).toFixed(2)}`;
+  const close = diagnostic?.latest_close;
+  const vwap = diagnostic?.vwap;
+  elements.orbDiagnosticPrice.textContent = close == null || vwap == null ? "—" : `${Number(close).toFixed(2)} / ${Number(vwap).toFixed(2)}`;
+  const option = diagnostic?.option || {};
+  elements.orbDiagnosticOption.textContent = option.strike == null ? (option.status || "Waiting for setup") : `${option.strike} ${option.side} · ₹${Number(option.ltp).toFixed(2)}`;
+  elements.orbDiagnosticGates.replaceChildren();
+  (diagnostic?.gates || []).forEach((gate) => {
+    const item = document.createElement("article");
+    const state = gate.passed === true ? "pass" : gate.passed === false ? "blocked" : "waiting";
+    item.className = `gate-card ${state}`;
+    const title = document.createElement("h3");
+    title.textContent = gate.label;
+    const detail = document.createElement("p");
+    detail.textContent = gate.detail;
+    const badge = document.createElement("span");
+    badge.textContent = state === "pass" ? "Ready" : state === "blocked" ? "Blocked" : "Waiting";
+    item.append(title, detail, badge);
+    elements.orbDiagnosticGates.append(item);
+  });
 }
 
 async function chooseExecutionMode(mode) {
@@ -696,7 +731,7 @@ async function refreshDashboard() {
   try {
     const health = await getHealth();
     setConnected(health);
-    const [dhan, activeProfile, profiles, paper, instruments, contextShadow, contextOutcomes, alerts, mode, auto, attempts, ollama, ollamaReport, regimeReport] = await Promise.all([
+    const [dhan, activeProfile, profiles, paper, instruments, contextShadow, contextOutcomes, alerts, mode, auto, attempts, ollama, ollamaReport, regimeReport, orbDiagnostic] = await Promise.all([
       get("/dhan/status"),
       get("/learning/active-profile"),
       get("/learning/profiles"),
@@ -711,6 +746,7 @@ async function refreshDashboard() {
       get("/ollama/status").catch(() => ({ enabled: false, available: false, model: "Ollama", last_error: "Ollama status is unavailable." })),
       get("/reports/ollama").catch(() => ({ total_reviews: 0, allow_count: 0, review_count: 0, skip_count: 0, linked_closed_trades: 0, linked_net_pnl: 0 })),
       get("/reports/regime-performance").catch(() => ({ latest_observation: null, strategy_performance: [], recommendations: [], minimum_closed_trades: 30 })),
+      get("/research/orb-vwap/diagnostics").catch(() => null),
     ]);
     const evaluations = await Promise.all(
       profiles.map((profile) => get(`/learning/profiles/${encodeURIComponent(profile.id)}/evaluation`).catch(() => null)),
@@ -721,6 +757,7 @@ async function refreshDashboard() {
     renderOllama(ollama, ollamaReport);
     renderRegime(regimeReport);
     renderExecution(mode, auto, attempts);
+    renderOrbDiagnostics(orbDiagnostic);
     renderContextShadow(contextShadow, contextOutcomes);
     renderOutcomeResearch(contextOutcomes);
     renderProfiles(profiles, evaluations.filter(Boolean), activeProfile);

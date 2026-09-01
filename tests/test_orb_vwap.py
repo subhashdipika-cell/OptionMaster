@@ -4,7 +4,7 @@ from optionmaster.backtest.orb_vwap import _directional_movement, _session_vwap
 from optionmaster.backtest.spot import SpotCandle
 from optionmaster.context.models import PriceBar
 from optionmaster.market.models import OptionSide
-from optionmaster.strategy.orb_vwap_live import evaluate_m1_bars
+from optionmaster.strategy.orb_vwap_live import diagnose_m1_bars, evaluate_m1_bars
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -44,3 +44,21 @@ def test_live_evaluator_uses_only_completed_m1_bars_for_a_bullish_orb_setup():
     assert setup is not None
     assert setup.side is OptionSide.CE
     assert setup.signal_bar_closed_at == start + timedelta(minutes=50)
+
+
+def test_live_diagnostic_names_the_missing_opening_range_breakout():
+    start = datetime(2026, 7, 14, 9, 15, tzinfo=IST)
+    bars = [
+        PriceBar(
+            timestamp=start + timedelta(minutes=index), open=24000, high=24005,
+            low=23995, close=24000, volume=100,
+        )
+        for index in range(41)
+    ]
+
+    diagnostic = diagnose_m1_bars(bars, now=start + timedelta(minutes=41))
+    breakout = next(gate for gate in diagnostic.gates if gate.key == "breakout")
+
+    assert diagnostic.ready is False
+    assert breakout.passed is False
+    assert "remains inside" in breakout.detail

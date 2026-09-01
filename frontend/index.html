@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#071425" />
     <title>OptionMaster | Paper Trading Intelligence</title>
-    <link rel="stylesheet" href="styles.css?v=20260807g" />
+    <link rel="stylesheet" href="styles.css?v=20260901a" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -107,6 +107,24 @@
             <div><span>Last decision</span><strong id="auto-trader-attempt">Loading</strong></div>
           </div>
           <p class="fine-print" id="execution-detail">The backend starts in Paper Trade mode after every restart.</p>
+        </section>
+
+        <section class="panel orb-diagnostics-panel" aria-label="ORB and VWAP live diagnostic">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">LIVE PAPER-TRIAL DIAGNOSTIC</p>
+              <h2>Why the ORB + VWAP scalper is waiting</h2>
+            </div>
+            <span class="pill neutral" id="orb-diagnostic-phase">Checking gates</span>
+          </div>
+          <p class="section-copy" id="orb-diagnostic-summary">Loading the latest completed five-minute bar and option conditions.</p>
+          <div class="orb-levels">
+            <div><span>Opening range</span><strong id="orb-diagnostic-range">—</strong></div>
+            <div><span>Latest close / VWAP</span><strong id="orb-diagnostic-price">—</strong></div>
+            <div><span>ATM option</span><strong id="orb-diagnostic-option">—</strong></div>
+          </div>
+          <div class="gate-grid" id="orb-diagnostic-gates" aria-live="polite"></div>
+          <p class="fine-print">This is read-only. It explains the fixed paper-trial checklist and cannot create or alter a trade.</p>
         </section>
 
         <section class="panel retest-monitor-panel" aria-label="15-second breakout retest paper monitor">
@@ -337,6 +355,6 @@
       </article>
     </template>
 
-    <script src="app.js?v=20260807g" defer></script>
+    <script src="app.js?v=20260901a" defer></script>
   </body>
 </html>

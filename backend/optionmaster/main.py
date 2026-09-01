@@ -67,7 +67,12 @@ from optionmaster.scalping.models import (
 from optionmaster.scalping.session import ScalpingSessionManager
 from optionmaster.strategy.profiles import StrategyProfile
 from optionmaster.strategy.profiles import PAPER_ORB_VWAP_PROFILE
-from optionmaster.strategy.orb_vwap_live import PremiumMomentumTracker, evaluate_m1_bars
+from optionmaster.strategy.orb_vwap_live import (
+    OrbVwapGate,
+    PremiumMomentumTracker,
+    diagnose_m1_bars,
+    evaluate_m1_bars,
+)
 from optionmaster.strategy.selector import select_signal
 
 app = FastAPI(title="OptionMaster", version=__version__)
@@ -1004,6 +1009,94 @@ def create_orb_vwap_paper_trade(request: CreatePaperTradeRequest) -> PaperTradeD
         )
     except (ScripMasterError, QuantityResolutionError, PaperTradeRejected) as exc:
         return PaperTradeDecision(accepted=False, reason=f"ORB/VWAP: {exc}", analysis=analysis)
+
+
+@app.get("/api/v1/research/orb-vwap/diagnostics")
+def orb_vwap_diagnostics() -> dict[str, object]:
+    """Expose the live paper trial's gates without placing or changing an order."""
+    settings = get_settings()
+    if not settings.dhan_configured:
+        raise HTTPException(status_code=503, detail="Dhan credentials are not configured.")
+    try:
+        service = DhanMarketService(DhanClientFactory(settings))
+        from datetime import date
+        candidates = sorted(
+            item for item in service.expiries(settings.auto_security_id, settings.auto_segment)
+            if item > date.today().isoformat()
+        )
+        expiry = candidates[0] if candidates else None
+        if expiry is None:
+            raise RuntimeError("No non-expiry-day contract is available.")
+        snapshot = service.live_snapshot(
+            symbol=settings.auto_symbol, security_id=settings.auto_security_id,
+            segment=settings.auto_segment, expiry=expiry,
+            instrument_type=settings.auto_instrument_type,
+            vix_security_id=settings.india_vix_security_id,
+            vix_segment=settings.india_vix_segment,
+            vix_instrument_type=settings.india_vix_instrument_type,
+        )
+        bars = service.intraday_bars(
+            security_id=settings.auto_security_id, segment=settings.auto_segment,
+            instrument_type=settings.auto_instrument_type, interval=1,
+            lookback_days=1, maximum_bars=450,
+        )
+        diagnostic = diagnose_m1_bars(bars)
+        gates = list(diagnostic.gates)
+        option_detail: dict[str, object] = {"status": "Waiting for a structural setup."}
+        ready = diagnostic.ready
+        if diagnostic.candidate_side is not None:
+            quote = min(
+                (item for item in snapshot.option_quotes if item.side is diagnostic.candidate_side),
+                key=lambda item: abs(item.strike - snapshot.underlying), default=None,
+            )
+            if quote is None:
+                gates.append(OrbVwapGate(
+                    key="liquidity", label="ATM option liquidity", passed=False,
+                    detail="No current ATM quote.",
+                ))
+                gates.append(OrbVwapGate(
+                    key="premium", label="Option premium momentum", passed=None,
+                    detail="Waiting for a usable ATM quote.",
+                ))
+                ready = False
+            else:
+                liquid = quote.ltp >= 20 and quote.ask > 0 and quote.ask <= 600 and quote.bid > 0 and quote.spread_fraction <= 0.01
+                spread_pct = quote.spread_fraction * 100
+                gates.append(OrbVwapGate(
+                    key="liquidity", label="ATM option liquidity", passed=liquid,
+                    detail=(f"{quote.strike:.0f} {quote.side.value}: LTP ₹{quote.ltp:.2f}; "
+                            f"spread {spread_pct:.2f}% (need ≤ 1.00%)."),
+                ))
+                change = orb_vwap_premium_tracker.latest_change(
+                    snapshot, strike=quote.strike, side=quote.side,
+                )
+                momentum_ok = change is not None and change >= 0.15
+                gates.append(OrbVwapGate(
+                    key="premium", label="Option premium momentum",
+                    passed=momentum_ok if liquid and diagnostic.ready else None,
+                    detail=(f"{change:+.2f}% since the prior worker observation; need ≥ +0.15%." if change is not None
+                            else "Awaiting a second live option observation for momentum confirmation."),
+                ))
+                option_detail = {
+                    "strike": quote.strike, "side": quote.side.value, "ltp": quote.ltp,
+                    "bid": quote.bid, "ask": quote.ask, "spread_pct": round(spread_pct, 3),
+                    "premium_momentum_pct": round(change, 3) if change is not None else None,
+                }
+                ready = ready and liquid and momentum_ok
+        payload = diagnostic.model_dump(mode="json")
+        payload.update({
+            "ready": ready,
+            "gates": [gate.model_dump(mode="json") for gate in gates],
+            "option": option_detail,
+            "expiry": expiry,
+        })
+        if ready:
+            payload["summary"] = "Every visible ORB/VWAP gate is currently satisfied; the paper worker will evaluate the entry on its next cycle."
+        return payload
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ORB/VWAP diagnostics failed: {exc}") from exc
 
 
 def create_dhan_real_trade(request: CreatePaperTradeRequest) -> RealTradeDecision:

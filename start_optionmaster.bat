@@ -60,12 +60,12 @@ if errorlevel 1 (
     echo OptionMaster dashboard is already listening on port %FRONTEND_PORT%.
 )
 
-powershell.exe -NoLogo -NoProfile -Command "$deadline=(Get-Date).AddSeconds(30); do { try { $r=Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:%FRONTEND_PORT%/' -TimeoutSec 2; if ($r.StatusCode -eq 200) { Start-Process 'http://127.0.0.1:%FRONTEND_PORT%/?build=20260807g'; exit 0 } } catch {}; Start-Sleep -Milliseconds 500 } while ((Get-Date) -lt $deadline); exit 1"
+powershell.exe -NoLogo -NoProfile -Command "$deadline=(Get-Date).AddSeconds(30); do { try { $r=Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:%FRONTEND_PORT%/' -TimeoutSec 2; if ($r.StatusCode -eq 200) { Start-Process 'http://127.0.0.1:%FRONTEND_PORT%/?build=20260901a'; exit 0 } } catch {}; Start-Sleep -Milliseconds 500 } while ((Get-Date) -lt $deadline); exit 1"
 if errorlevel 1 (
     echo [ERROR] OptionMaster dashboard did not become ready within 30 seconds.
     exit /b 1
 )
 
 echo.
-echo OptionMaster is available at http://127.0.0.1:%FRONTEND_PORT%/?build=20260807g
+echo OptionMaster is available at http://127.0.0.1:%FRONTEND_PORT%/?build=20260901a
 endlocal
